@@ -354,13 +354,37 @@ function AttendanceApp() {
     flash(n + " row" + (n === 1 ? "" : "s") + " updated");
   };
   const onCellKey = (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
+    const key = e.key;
+    if (key !== "Enter" && key !== "ArrowDown" && key !== "ArrowUp" && key !== "ArrowLeft" && key !== "ArrowRight") return;
     const td = e.target.closest("td"), tr = e.target.closest("tr");
     if (!td || !tr) return;
-    const idx = Array.prototype.indexOf.call(tr.children, td);
-    let nx = tr.nextElementSibling;
-    while (nx) { const cell = nx.children[idx]; const inp = cell && cell.querySelector("input:not([type=checkbox])"); if (inp) { inp.focus(); if (inp.select) inp.select(); break; } nx = nx.nextElementSibling; }
+
+    const focusCell = (cell) => {
+      const inp = cell && cell.querySelector("input:not([type=checkbox]), select");
+      if (inp) { inp.focus(); if (inp.select) inp.select(); return true; }
+      return false;
+    };
+
+    // Enter / ArrowDown / ArrowUp: move within the same column, to the next/previous row
+    if (key === "Enter" || key === "ArrowDown" || key === "ArrowUp") {
+      e.preventDefault();
+      const idx = Array.prototype.indexOf.call(tr.children, td);
+      let sib = key === "ArrowUp" ? tr.previousElementSibling : tr.nextElementSibling;
+      while (sib) { if (focusCell(sib.children[idx])) break; sib = key === "ArrowUp" ? sib.previousElementSibling : sib.nextElementSibling; }
+      return;
+    }
+
+    // ArrowLeft / ArrowRight: move within the same row, but only once the caret is already
+    // at that edge (so normal in-field cursor movement still works); <select> has no caret,
+    // so it always hops.
+    const el = e.target;
+    const isSelect = el.tagName === "SELECT";
+    const atStart = isSelect || el.selectionStart === 0;
+    const atEnd = isSelect || el.selectionEnd === el.value.length;
+    if ((key === "ArrowLeft" && !atStart) || (key === "ArrowRight" && !atEnd)) return;
+    e.preventDefault();
+    let sib = key === "ArrowLeft" ? td.previousElementSibling : td.nextElementSibling;
+    while (sib) { if (focusCell(sib)) break; sib = key === "ArrowLeft" ? sib.previousElementSibling : sib.nextElementSibling; }
   };
   const clearAll = () => {
     if (!rows.length) return;
@@ -600,11 +624,11 @@ function AttendanceApp() {
   const CAP = 3000;
   const fz = (left, w) => ({ position: "sticky", left, minWidth: w, width: w, zIndex: 1, background: "#fff" });
   const fzh = (left, w) => ({ position: "sticky", left, minWidth: w, width: w, zIndex: 3, background: "#F8FAFC" });
-  const SelectCell = ({ value, options, onChange, placeholder, left }) => {
+  const SelectCell = ({ value, options, onChange, placeholder, left, onKeyDown }) => {
     const v = value || "";
     const known = options.includes(v);
     return (
-      <select className={"cell" + (left ? " l" : "")} value={v} style={{ color: v === "OFF" ? "#9AA1AC" : undefined }} onChange={(e) => { const nv = e.target.value; if (nv === "__other__") { const x = window.prompt("Enter " + (placeholder || "value")); if (x != null && x.trim() !== "") onChange(x.trim()); } else onChange(nv); }}>
+      <select className={"cell" + (left ? " l" : "")} value={v} style={{ color: v === "OFF" ? "#9AA1AC" : undefined }} onKeyDown={onKeyDown} onChange={(e) => { const nv = e.target.value; if (nv === "__other__") { const x = window.prompt("Enter " + (placeholder || "value")); if (x != null && x.trim() !== "") onChange(x.trim()); } else onChange(nv); }}>
         <option value="">{placeholder || "\u2014"}</option>
         {!known && v !== "" && <option value={v}>{v}</option>}
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -764,8 +788,8 @@ function AttendanceApp() {
                             {fmtMDY(r.date) || "\u2014"}
                           </td>
                           <td className="calc" style={{ fontSize: 12 }}>{d.day || "\u2014"}</td>
-                          <td><SelectCell left value={r.campaign} options={campaigns} placeholder="Campaign" onChange={(v) => setCell(r.id, "campaign", v)} /></td>
-                          <td><SelectCell value={r.shift} options={shiftOptions} placeholder="Shift" onChange={(v) => setCell(r.id, "shift", v)} /></td>
+                          <td><SelectCell left value={r.campaign} options={campaigns} placeholder="Campaign" onChange={(v) => setCell(r.id, "campaign", v)} onKeyDown={onCellKey} /></td>
+                          <td><SelectCell value={r.shift} options={shiftOptions} placeholder="Shift" onChange={(v) => setCell(r.id, "shift", v)} onKeyDown={onCellKey} /></td>
                           {d.schedBad
                             ? <td title="Shift text can't be read as a time range" style={{ background: "#FDECEC", color: "#B23A3A", fontSize: 11, fontWeight: 600 }}>check shift</td>
                             : <td className="calc mono" title={d.sched == null ? "" : d.sched + " min scheduled"}>{d.sched == null ? "\u2014" : <span style={{ color: "#16A34A", fontWeight: 700, fontSize: 14 }}>{"\u2713"}</span>}</td>}
