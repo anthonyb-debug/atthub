@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Attendance Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin: 0; padding: 0; background: #F6F7F9; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  #root { min-height: 100vh; }
+  #boot { font-family: 'Inter', system-ui, sans-serif; color: #6B7385; text-align: center; padding: 80px 20px; }
+  @keyframes todayBreathe { 0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(22,163,74,.45); } 50% { opacity: .55; transform: scale(1.35); box-shadow: 0 0 0 4px rgba(22,163,74,0); } }
+  .today-dot { animation: todayBreathe 1.8s ease-in-out infinite; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"><div id="boot">Loading Attendance Tracker…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* =========================================================================
+   ATTENDANCE TRACKER
+   Tracker columns: Names · Date · Day · Campaign · Shift · Scheduled · Absent ·
+   Tardy · Early Out · Leave · OT · Minutes.
+   Scheduled (shown as a check) and Minutes are auto-calculated from the shift
+   string and the deduction minutes. Leave is planned/credited and does not
+   reduce Minutes; Absent/Tardy/Early Out do.
+   ========================================================================= */
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PALETTE = ["#2563EB", "#C08A2D", "#5A54C9", "#B23A3A", "#2C7BB6", "#8E44AD", "#16A085", "#D35400"];
+const EMPTY_ROWS = [];
+const EMPTY_MAP = new Map();
+const monthOf = (r) => { const s = r && r.date; if (!s) return { year: "", month: "" }; const p = String(s).split("-"); return p.length === 3 ? { year: +p[0], month: MONTHS[+p[1] - 1] } : { year: "", month: "" }; };
+
+const num = (x) => { const n = parseFloat(x); return isNaN(n) ? 0 : n; };
+
+/* parse "9:00PM", "6:00 AM", "22:00" -> minutes from midnight */
+function parseT(x) {
+  if (x == null) return null;
+  let s = String(x).replace(/\s+/g, "").toUpperCase();
+  const m = s.match(/^(\d{1,2}):(\d{2})(AM|PM)?$/);
+  if (!m) return null;
+  let h = +m[1]; const mm = +m[2]; const ap = m[3];
+  if (ap === "AM") { if (h === 12) h = 0; }
+  else if (ap === "PM") { if (h !== 12) h += 12; }
+  if (h > 23 || mm > 59) return null;
+  return h * 60 + mm;
+}
+
+/* scheduled working minutes from a shift string (duration minus break) */
+function schedMin(shift) {
+  if (!shift) return null;
+  const s = String(shift).trim();
+  if (!s || /off/i.test(s) || /not\s*yet\s*hired/i.test(s)) return null;
+  const idx = s.indexOf("-");
+  if (idx < 0) return null;
+  const a = parseT(s.slice(0, idx)), b = parseT(s.slice(idx + 1));
+  if (a == null || b == null) return null;
+  const dur = (((b - a) % 1440) + 1440) % 1440;
+  if (dur <= 0 || dur > 960) return null; // 0-length or absurd (>16h) shift -> flagged as "check shift"
+  const brk = dur >= 720 ? 120 : 60;
+  return dur - brk;
+}
+
+function derive(r) {
+  const d = r.date ? new Date(r.date + "T00:00:00") : null;
+  const valid = d && !isNaN(d.getTime());
+  const sched = schedMin(r.shift);
+  const ded = num(r.absent) + num(r.tardy) + num(r.earlyout); // Leave is planned/credited, not deducted
+  const minutes = sched == null ? null : sched - ded;
+  const sh = String(r.shift || "").trim();
+  const schedBad = !!(sh && sched == null && !/off/i.test(sh) && !/not\s*yet\s*hired/i.test(sh));
+  return {
+    year: valid ? d.getFullYear() : "",
+    month: valid ? MONTHS[d.getMonth()] : "",
+    day: valid ? DAYS[d.getDay()] : "",
+    sched, ded, minutes, schedBad,
+  };
+}
+
+/* Build each agent's usual shift per weekday (captures rest days & rotations) */
+function buildProfiles(src) {
+  const P = {};
+  src.forEach((r) => {
+    const name = (r.name || "").trim();
+    if (!name) return;
+    const wd = r.date ? new Date(r.date + "T00:00:00").getDay() : null;
+    P[name] = P[name] || { name, campC: {}, wd: [{}, {}, {}, {}, {}, {}, {}], shiftC: {} };
+    const p = P[name];
+    if (r.campaign) p.campC[r.campaign] = (p.campC[r.campaign] || 0) + 1;
+    const sh = (r.shift || "").trim();
+    if (wd != null) p.wd[wd][sh] = (p.wd[wd][sh] || 0) + 1;
+    if (sh && !/off/i.test(sh) && !/not\s*yet\s*hired/i.test(sh)) p.shiftC[sh] = (p.shiftC[sh] || 0) + 1;
+  });
+  const top = (o) => { let bk = null, bv = -1; for (const k in o) { if (o[k] > bv) { bv = o[k]; bk = k; } } return bk; };
+  const out = {};
+  Object.values(P).forEach((p) => {
+    out[p.name] = { name: p.name, campaign: top(p.campC) || "", weekday: p.wd.map((o) => (Object.keys(o).length ? top(o) : null)), fallback: top(p.shiftC) || "" };
+  });
+  return out;
+}
+
+const DEFAULT_GS_URL = "https://script.google.com/macros/s/AKfycbw92HPvI9lODOkr2NTQRyrIIArxtXpLxJ8A5JdcaVZRNppd6t_uxLMEdBIt7gQ2yPz3zg/exec";
+
+const APPS_SCRIPT = `/** Attendance Tracker sync — paste into Extensions > Apps Script,
+ *  Deploy > New deployment > Web app. Execute as: Me. Access: Anyone.
+ *  Then paste the Web app URL into the tracker. */
+function doPost(e) {
+  var data = JSON.parse(e.postData.contents);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  writeTab(ss, "Attendance", data.rows || []);
+  writeState(ss, "_state", data.state || []);
+  return ContentService.createTextOutput("ok");
+}
+function writeTab(ss, name, rows) {
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  sh.clearContents();
+  if (!rows.length) return;
+  var order = [];
+  rows.forEach(function (r) { Object.keys(r).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); }); });
+  var values = [order].concat(rows.map(function (r) { return order.map(function (k) { return r[k] === undefined ? "" : r[k]; }); }));
+  sh.getRange(1, 1, values.length, order.length).setValues(values);
+  sh.setFrozenRows(1);
+}
+function writeState(ss, name, rows) {
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  sh.clearContents();
+  var values = [["json"]].concat(rows.map(function (r) { return [r.json]; }));
+  sh.getRange(1, 1, values.length, 1).setValues(values);
+  try { sh.hideSheet(); } catch (err) {}
+}
+function doGet(e) {
+  var cb = (e.parameter && e.parameter.callback) || "callback";
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("_state");
+  var out = [];
+  if (sh) { var v = sh.getDataRange().getValues(); for (var i = 1; i < v.length; i++) if (v[i][0]) out.push(v[i][0]); }
+  return ContentService.createTextOutput(cb + "(" + JSON.stringify(out) + ")").setMimeType(ContentService.MimeType.JAVASCRIPT);
+}`;
+
+const GKEY = "attendance:rows";
+function loadRows() { try { const r = localStorage.getItem(GKEY); return r ? JSON.parse(r) : []; } catch { return []; } }
+function saveRows(rows) { try { localStorage.setItem(GKEY, JSON.stringify(rows)); } catch (e) { console.error(e); } }
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const todayYMD = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+const mins = (x) => (x == null ? "" : Math.round(x));
+const fmtMDY = (ymd) => { if (!ymd) return ""; const p = String(ymd).split("-"); return p.length === 3 ? p[1] + "/" + p[2] + "/" + p[0] : String(ymd); };
+
+function AttendanceApp() {
+  const [view, setView] = useState("tracker");
+  const [rows, setRows] = useState([]);
+  const [toast, setToast] = useState(null);
+  const fileRef = useRef();
+  const edited = useRef(false);
+  const saveTimer = useRef();
+  const rowsRef = useRef([]);
+  const [gsUrl, setGsUrl] = useState("");
+  const [gsDraft, setGsDraft] = useState("");
+  const [syncStatus, setSyncStatus] = useState("idle");
+  const [lastSync, setLastSync] = useState(null);
+  const [showSync, setShowSync] = useState(false);
+  const syncTimer = useRef();
+
+  // tracker filters
+  const [fMonth, setFMonth] = useState("all");
+  const [fCampaign, setFCampaign] = useState("all");
+  const [fYear, setFYear] = useState("all");
+  const [fDate, setFDate] = useState("");
+  const [fAgent, setFAgent] = useState("all");
+  const flashRef = useRef();
+  const didInit = useRef(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [showAgent, setShowAgent] = useState(null);
+
+  // dashboard filters
+  const [dMonth, setDMonth] = useState("all");
+  const [dYear, setDYear] = useState("all");
+  const [dCampaign, setDCampaign] = useState("all");
+  const [dAgent, setDAgent] = useState("all");
+  const [dSortKey, setDSortKey] = useState("attendance");
+  const [dSortDir, setDSortDir] = useState("desc");
+  const [showGen, setShowGen] = useState(false);
+  const [showBatch, setShowBatch] = useState(false);
+  const [batchShift, setBatchShift] = useState("");
+  const [batchCampaign, setBatchCampaign] = useState("");
+  const [genMonth, setGenMonth] = useState(MONTHS[0]);
+  const [genYear, setGenYear] = useState(String(new Date().getFullYear()));
+  const [genCampaign, setGenCampaign] = useState("all");
+  const [genSource, setGenSource] = useState("all");
+  const [genSkip, setGenSkip] = useState(true);
+
+  // new agent modal
+  const [showNewAgent, setShowNewAgent] = useState(false);
+  const [naName, setNaName] = useState("");
+  const [naCampaign, setNaCampaign] = useState("");
+  const [naMonth, setNaMonth] = useState(MONTHS[0]);
+  const [naYear, setNaYear] = useState(String(new Date().getFullYear()));
+  const [naShift, setNaShift] = useState("");
+  const [naRest, setNaRest] = useState([0, 6]);
+
+  useEffect(() => { setRows(loadRows()); const u = localStorage.getItem("attendance:gsurl") || DEFAULT_GS_URL; setGsUrl(u); setGsDraft(u); }, []);
+  useEffect(() => { setSelected(new Set()); }, [fMonth, fYear, fCampaign, fAgent, fDate]);
+  useEffect(() => { const flush = () => { clearTimeout(saveTimer.current); try { localStorage.setItem(GKEY, JSON.stringify(rowsRef.current)); } catch (e) {} }; window.addEventListener("beforeunload", flush); return () => window.removeEventListener("beforeunload", flush); }, []);
+  useEffect(() => {
+    if (didInit.current || !rows.length) return;
+    let best = null;
+    rows.forEach((r) => { const d = monthOf(r); if (d.month && d.year !== "") { const k = d.year * 100 + MONTHS.indexOf(d.month); if (!best || k > best.k) best = { k, month: d.month, year: String(d.year) }; } });
+    if (best) { setFMonth(best.month); setFYear(best.year); }
+    didInit.current = true;
+  }, [rows]);
+  const flash = (m) => { const o = typeof m === "string" ? { msg: m } : m; setToast(o); clearTimeout(flashRef.current); flashRef.current = setTimeout(() => setToast(null), o.fn ? 6000 : 2400); };
+  const commit = (next) => { edited.current = true; rowsRef.current = next; setRows(next); clearTimeout(saveTimer.current); saveTimer.current = setTimeout(() => saveRows(next), 400); };
+
+  const campaigns = useMemo(() => Array.from(new Set(rows.map((r) => (r.campaign || "").trim()).filter(Boolean))).sort(), [rows]);
+  const campColor = (c) => PALETTE[(campaigns.indexOf(c) + PALETTE.length) % PALETTE.length];
+  const derivedById = useMemo(() => { if (view !== "dashboard") return EMPTY_MAP; const m = new Map(); rows.forEach((r) => m.set(r.id, derive(r))); return m; }, [rows, view]);
+  const dOf = (r) => derivedById.get(r.id) || derive(r);
+  const yearsList = useMemo(() => Array.from(new Set(rows.map((r) => String(monthOf(r).year)).filter((y) => y && y !== ""))).sort().reverse(), [rows]);
+  const monthsAvailable = useMemo(() => {
+    const m = new Map();
+    rows.forEach((r) => { const d = monthOf(r); if (d.month && d.year) m.set(d.month + " " + d.year, { key: d.month + " " + d.year, month: d.month, year: String(d.year) }); });
+    return Array.from(m.values()).sort((a, b) => (b.year - a.year) || (MONTHS.indexOf(b.month) - MONTHS.indexOf(a.month)));
+  }, [rows]);
+
+  const openGen = () => {
+    const base = new Date(); base.setDate(1); base.setMonth(base.getMonth() + 1);
+    setGenMonth(MONTHS[base.getMonth()]); setGenYear(String(base.getFullYear()));
+    setGenCampaign("all"); setGenSource(monthsAvailable[0] ? monthsAvailable[0].key : "all"); setGenSkip(true);
+    setShowGen(true);
+  };
+  const generate = () => {
+    const mi = MONTHS.indexOf(genMonth); const y = parseInt(genYear, 10);
+    if (mi < 0 || !y) return flash("Pick a valid month and year");
+    let srcRows = rows;
+    if (genSource !== "all") { const sm = genSource.slice(0, genSource.lastIndexOf(" ")); const sy = genSource.slice(genSource.lastIndexOf(" ") + 1); srcRows = rows.filter((r) => { const d = monthOf(r); return d.month === sm && String(d.year) === sy; }); }
+    const profiles = buildProfiles(srcRows.length ? srcRows : rows);
+    let agents = Object.values(profiles);
+    if (genCampaign !== "all") agents = agents.filter((p) => p.campaign === genCampaign);
+    if (!agents.length) return flash("No agents found to generate from");
+    const dim = new Date(y, mi + 1, 0).getDate();
+    const existing = new Set(rows.map((r) => (r.name || "").toLowerCase() + "|" + r.date));
+    const out = [];
+    agents.forEach((p) => {
+      for (let day = 1; day <= dim; day++) {
+        const date = y + "-" + String(mi + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+        if (genSkip && existing.has(p.name.toLowerCase() + "|" + date)) continue;
+        const wd = new Date(date + "T00:00:00").getDay();
+        const shift = p.weekday[wd] && p.weekday[wd] !== "" ? p.weekday[wd] : (p.fallback || "");
+        out.push({ id: uid(), date, shift, campaign: p.campaign, name: p.name, absent: "", tardy: "", earlyout: "", leave: "", leaveType: "", ot: "" });
+      }
+    });
+    if (!out.length) return flash("Nothing to add — those rows already exist");
+    commit([...rows, ...out]);
+    setShowGen(false); setFMonth(genMonth); setFYear(String(y)); setView("tracker");
+    flash("Generated " + out.length + " rows for " + genMonth + " " + y);
+  };
+
+  const openNewAgent = () => {
+    const base = new Date(); base.setDate(1); base.setMonth(base.getMonth() + 1);
+    setNaName(""); setNaCampaign(fCampaign !== "all" ? fCampaign : "");
+    setNaMonth(MONTHS[base.getMonth()]); setNaYear(String(base.getFullYear()));
+    setNaShift(""); setNaRest([0, 6]);
+    setShowNewAgent(true);
+  };
+  const addNewAgent = () => {
+    const name = naName.trim();
+    if (!name) return flash("Enter the agent's name");
+    const mi = MONTHS.indexOf(naMonth); const y = parseInt(naYear, 10);
+    if (mi < 0 || !y) return flash("Pick a valid month and year");
+    if (!naShift) return flash("Pick the working shift");
+    const dim = new Date(y, mi + 1, 0).getDate();
+    const existing = new Set(rows.map((r) => (r.name || "").toLowerCase() + "|" + r.date));
+    const out = [];
+    for (let day = 1; day <= dim; day++) {
+      const date = y + "-" + String(mi + 1).padStart(2, "0") + "-" + String(day).padStart(2, "0");
+      if (existing.has(name.toLowerCase() + "|" + date)) continue;
+      const wd = new Date(date + "T00:00:00").getDay();
+      const shift = naRest.includes(wd) ? "OFF" : naShift;
+      out.push({ id: uid(), date, shift, campaign: naCampaign, name, absent: "", tardy: "", earlyout: "", leave: "", leaveType: "", ot: "" });
+    }
+    if (!out.length) return flash("Nothing to add — those rows already exist");
+    commit([...rows, ...out]);
+    setShowNewAgent(false); setFMonth(naMonth); setFYear(String(y)); setFAgent(name); setView("tracker");
+    flash("Added " + out.length + " rows for " + name + " — " + naMonth + " " + y);
+  };
+
+  /* ---------- tracker ---------- */
+  const trackerRows = useMemo(() => rows.filter((r) => {
+    const dv = monthOf(r);
+    const agentOk = fAgent === "all" || (r.name || "") === fAgent;
+    const campOk = fCampaign === "all" || (r.campaign || "") === fCampaign;
+    if (fDate) return r.date === fDate && campOk && agentOk;
+    return (fMonth === "all" || dv.month === fMonth) && (fYear === "all" || String(dv.year) === String(fYear)) && campOk && agentOk;
+  }).sort((a, b) => {
+    const da = a.date || "9999-99-99", db = b.date || "9999-99-99";
+    if (da !== db) return da < db ? -1 : 1;
+    return (a.name || "").localeCompare(b.name || "");
+  }), [rows, fMonth, fYear, fCampaign, fAgent, fDate]);
+
+  const addRow = () => {
+    const name = (window.prompt("Agent name (Last, First):", "") || "").trim();
+    commit([...rows, { id: uid(), date: fDate || todayYMD(), shift: "", campaign: fCampaign === "all" ? "" : fCampaign, name, absent: "", tardy: "", earlyout: "", leave: "", leaveType: "", ot: "" }]);
+  };
+  const setCell = (id, k, v) => commit(rows.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
+  const delRow = (id) => {
+    const row = rows.find((r) => r.id === id);
+    commit(rows.filter((r) => r.id !== id));
+    if (row) flash({ msg: "Row deleted", actionLabel: "Undo", fn: () => setRows((prev) => { const n = [...prev, row]; saveRows(n); return n; }) });
+  };
+  const toggleSelect = (id) => setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleSelectAll = () => setSelected((prev) => {
+    const ids = trackerRows.slice(0, CAP).map((r) => r.id);
+    const allSelected = ids.length > 0 && ids.every((id) => prev.has(id));
+    return allSelected ? new Set() : new Set(ids);
+  });
+  const delSelected = () => {
+    if (!selected.size) return;
+    const ids = selected;
+    const removed = rows.filter((r) => ids.has(r.id));
+    commit(rows.filter((r) => !ids.has(r.id)));
+    setSelected(new Set());
+    flash({ msg: removed.length + " row" + (removed.length === 1 ? "" : "s") + " deleted", actionLabel: "Undo", fn: () => setRows((prev) => { const n = [...prev, ...removed]; saveRows(n); return n; }) });
+  };
+  const applyBatch = () => {
+    if (!selected.size) return;
+    if (!batchShift && !batchCampaign) { setShowBatch(false); return; }
+    commit(rows.map((r) => (selected.has(r.id) ? { ...r, shift: batchShift || r.shift, campaign: batchCampaign || r.campaign } : r)));
+    const n = selected.size;
+    setShowBatch(false); setSelected(new Set());
+    flash(n + " row" + (n === 1 ? "" : "s") + " updated");
+  };
+  const markSelected = (kind) => {
+    if (!selected.size) return;
+    commit(rows.map((r) => {
+      if (!selected.has(r.id)) return r;
+      if (kind === "off") return { ...r, shift: "OFF", absent: "", leave: "", tardy: "", earlyout: "", ot: "" };
+      if (kind === "clear") return { ...r, absent: "", leave: "", tardy: "", earlyout: "", ot: "" };
+      const s = schedMin(r.shift);
+      if (s == null) return r;
+      if (kind === "absent") return { ...r, absent: String(s), leave: "" };
+      if (kind === "leave") return { ...r, leave: String(s), absent: "" };
+      return r;
+    }));
+    const n = selected.size; setSelected(new Set());
+    flash(n + " row" + (n === 1 ? "" : "s") + " updated");
+  };
+  const onCellKey = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const td = e.target.closest("td"), tr = e.target.closest("tr");
+    if (!td || !tr) return;
+    const idx = Array.prototype.indexOf.call(tr.children, td);
+    let nx = tr.nextElementSibling;
+    while (nx) { const cell = nx.children[idx]; const inp = cell && cell.querySelector("input:not([type=checkbox])"); if (inp) { inp.focus(); if (inp.select) inp.select(); break; } nx = nx.nextElementSibling; }
+  };
+  const clearAll = () => {
+    if (!rows.length) return;
+    if (window.confirm("Delete ALL " + rows.length + " row(s) from this device? This cannot be undone — export or sync first if unsure.")) { commit([]); setSelected(new Set()); flash("All data cleared"); }
+  };
+
+  /* ---------- export / import ---------- */
+  const exportXLSX = () => {
+    if (!rows.length) return flash("Nothing to export yet");
+    const data = rows.map((r) => {
+      const d = dOf(r);
+      return {
+        Year: d.year, Month: d.month, Date: r.date || "", Day: d.day, Shift: r.shift || "",
+        Campaign: r.campaign || "", Names: r.name || "", Scheduled: d.sched == null ? "" : d.sched,
+        Absent: r.absent || "", Tardy: r.tardy || "", "Early Out": r.earlyout || "", Leave: r.leave || "",
+        OT: r.ot || "", Minutes: d.minutes == null ? "" : d.minutes,
+      };
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data), "Attendance");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.map((r) => ({ json: JSON.stringify(r) }))), "_backup");
+    XLSX.writeFile(wb, `Attendance_${todayYMD()}.xlsx`);
+    flash(`Exported ${rows.length} row(s)`);
+  };
+
+  const _pad2 = (n) => String(n).padStart(2, "0");
+  const _ymdLocal = (d) => d.getFullYear() + "-" + _pad2(d.getMonth() + 1) + "-" + _pad2(d.getDate());
+  const toYMD = (v) => {
+    if (v == null || v === "") return "";
+    // Excel Date objects (cellDates) are at local midnight — read local parts, never toISOString (that shifts the day by the timezone offset)
+    if (v instanceof Date) return isNaN(v) ? "" : _ymdLocal(v);
+    // Excel serial number -> calendar date via UTC epoch (timezone-independent)
+    if (typeof v === "number") { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? "" : d.toISOString().slice(0, 10); }
+    const s = String(v).trim();
+    let m;
+    if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return m[1] + "-" + _pad2(+m[2]) + "-" + _pad2(+m[3]);
+    if ((m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/))) return m[3] + "-" + _pad2(+m[1]) + "-" + _pad2(+m[2]); // MM/DD/YYYY
+    const d = new Date(s); return isNaN(d) ? s : _ymdLocal(d);
+  };
+  const importXLSX = async (file) => {
+    try {
+      const wb = XLSX.read(await file.arrayBuffer());
+      if (wb.SheetNames.includes("_backup")) {
+        const imported = XLSX.utils.sheet_to_json(wb.Sheets["_backup"]).map((r) => JSON.parse(r.json));
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        imported.forEach((r) => byId.set(r.id, r));
+        commit(Array.from(byId.values()));
+        return flash(`Imported ${imported.length} row(s) from backup`);
+      }
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
+      const pick = (o, keys) => { for (const k of Object.keys(o)) { const kn = k.toLowerCase().trim(); if (keys.includes(kn)) return o[k]; } return ""; };
+      const imported = raw.map((o) => ({
+        id: uid(),
+        date: toYMD(pick(o, ["date"])),
+        shift: String(pick(o, ["shift"]) || ""),
+        campaign: String(pick(o, ["campaign"]) || ""),
+        name: String(pick(o, ["names", "name"]) || ""),
+        absent: pick(o, ["absent"]), tardy: pick(o, ["tardy"]),
+        earlyout: pick(o, ["early out", "earlyout"]), leave: pick(o, ["leave"]),
+        leaveType: String(pick(o, ["leave type", "leavetype"]) || ""), ot: pick(o, ["ot"]),
+      })).filter((r) => r.name || r.shift || r.date);
+      const seen = new Set(rows.map((r) => (r.name || "").toLowerCase() + "|" + r.date));
+      const merged = [...rows]; let added = 0;
+      imported.forEach((r) => { const k = (r.name || "").toLowerCase() + "|" + r.date; if (seen.has(k)) return; seen.add(k); merged.push(r); added++; });
+      commit(merged);
+      flash(`Imported ${added} new row(s)` + (imported.length - added ? ` (${imported.length - added} duplicate(s) skipped)` : ""));
+    } catch (e) { console.error(e); flash("Could not read that file"); }
+  };
+
+  /* ---------- dashboard aggregation ---------- */
+  const dRows = useMemo(() => {
+    if (view !== "dashboard") return EMPTY_ROWS;
+    return rows.filter((r) => {
+      const dv = monthOf(r);
+      return (dMonth === "all" || dv.month === dMonth)
+        && (dYear === "all" || String(dv.year) === String(dYear))
+        && (dCampaign === "all" || (r.campaign || "") === dCampaign)
+        && (dAgent === "all" || (r.name || "") === dAgent);
+    });
+  }, [rows, view, dMonth, dYear, dCampaign, dAgent]);
+
+  const blank = () => ({ sched: 0, absent: 0, early: 0, tardy: 0, leave: 0, tardyCount: 0, ot: 0, days: 0, present: 0, absentD: 0, lateD: 0, leaveD: 0 });
+  const addInto = (acc, r) => {
+    const dv = dOf(r);
+    if (dv.sched == null) return; // OFF / not-yet-hired days excluded
+    acc.sched += dv.sched;
+    acc.absent += num(r.absent); acc.early += num(r.earlyout); acc.tardy += num(r.tardy); acc.leave += num(r.leave);
+    if (num(r.tardy) > 0) acc.tardyCount += 1;
+    const _ab = num(r.absent) > 0, _lv = num(r.leave) > 0;
+    if (_ab) acc.absentD += 1; if (_lv) acc.leaveD += 1; if (!_ab && !_lv) acc.present += 1; if (num(r.tardy) > 0) acc.lateD += 1;
+    acc.ot += num(r.ot); acc.days += 1;
+  };
+  const loss = (a) => a.absent + a.early + a.tardy;   // Loss Minutes = Absent + Early Out + Tardy
+  const rate = (a) => (a.sched > 0 ? (a.sched - loss(a)) / a.sched : null);
+  const shrink = (a) => (a.sched > 0 ? loss(a) / a.sched : null);
+
+  const byAgent = useMemo(() => {
+    const map = new Map();
+    dRows.forEach((r) => {
+      const key = (r.name || "—") + "|" + (r.campaign || "");
+      if (!map.has(key)) map.set(key, { name: r.name || "—", campaign: r.campaign || "", ...blank() });
+      addInto(map.get(key), r);
+    });
+    return Array.from(map.values());
+  }, [dRows]);
+
+  const byCampaign = useMemo(() => {
+    const map = new Map();
+    dRows.forEach((r) => {
+      const key = r.campaign || "—";
+      if (!map.has(key)) map.set(key, { campaign: r.campaign || "—", agents: new Set(), ...blank() });
+      const a = map.get(key); a.agents.add(r.name || "—"); addInto(a, r);
+    });
+    return Array.from(map.values()).map((a) => ({ ...a, agentCount: a.agents.size }));
+  }, [dRows]);
+
+  const overall = useMemo(() => { const a = blank(); dRows.forEach((r) => addInto(a, r)); return a; }, [dRows]);
+  const byMonth = useMemo(() => {
+    const m = new Map();
+    dRows.forEach((r) => { const dv = monthOf(r); if (!dv.month || dv.year === "") return; const key = dv.year + "-" + String(MONTHS.indexOf(dv.month) + 1).padStart(2, "0"); if (!m.has(key)) m.set(key, { key, label: dv.month.slice(0, 3) + " " + dv.year, ...blank() }); addInto(m.get(key), r); });
+    return Array.from(m.values()).sort((a, b) => (a.key < b.key ? -1 : 1));
+  }, [dRows]);
+  const exportDash = () => {
+    if (!dRows.length) return flash("Nothing to export");
+    const P = (x) => (x == null ? "" : +(x * 100).toFixed(2));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sortAgents.map((a) => ({ Agent: a.name, Campaign: a.campaign, Days: a.days, Scheduled: mins(a.sched), Absent: mins(a.absent), "Early Out": mins(a.early), Tardy: mins(a.tardy), "Tardy Ct": a.tardyCount, Leave: mins(a.leave), "Loss Min": mins(loss(a)), "Attendance %": P(rate(a)), "Shrinkage %": P(shrink(a)) }))), "By Agent");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byCampaign.map((a) => ({ Campaign: a.campaign, Agents: a.agentCount, Scheduled: mins(a.sched), Absent: mins(a.absent), "Early Out": mins(a.early), Tardy: mins(a.tardy), "Tardy Ct": a.tardyCount, Leave: mins(a.leave), "Loss Min": mins(loss(a)), "Attendance %": P(rate(a)), "Shrinkage %": P(shrink(a)) }))), "By Campaign");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byMonth.map((a) => ({ Month: a.label, Scheduled: mins(a.sched), "Loss Min": mins(loss(a)), "Attendance %": P(rate(a)), "Shrinkage %": P(shrink(a)) }))), "By Month");
+    XLSX.writeFile(wb, "Attendance_Dashboard_" + todayYMD() + ".xlsx");
+    flash("Dashboard exported");
+  };
+
+  /* ---------- Google Sheet sync ---------- */
+  const buildSyncPayload = () => {
+    const sortedRows = [...rows].sort((a, b) => {
+      const da = a.date || "9999-99-99", db = b.date || "9999-99-99";
+      if (da !== db) return da < db ? -1 : 1;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+    const rowsOut = sortedRows.map((r) => {
+      const d = dOf(r);
+      return { Year: d.year, Month: d.month, Date: r.date || "", Day: d.day, Shift: r.shift || "", Campaign: r.campaign || "", Names: r.name || "", Scheduled: d.sched == null ? "" : d.sched, Absent: r.absent || "", Tardy: r.tardy || "", "Early Out": r.earlyout || "", Leave: r.leave || "", OT: r.ot || "", Minutes: d.minutes == null ? "" : d.minutes };
+    });
+    return { rows: rowsOut, state: rows.map((r) => ({ json: JSON.stringify(r) })) };
+  };
+  const pushToSheet = async () => {
+    if (!gsUrl) return;
+    setSyncStatus("syncing");
+    try { await fetch(gsUrl, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(buildSyncPayload()) }); setSyncStatus("ok"); setLastSync(new Date()); }
+    catch (e) { setSyncStatus("error"); }
+  };
+  const pullFromSheet = () => {
+    if (!gsUrl) return flash("Link a Google Sheet first");
+    const cb = "__attPull_" + Date.now();
+    const el = document.createElement("script");
+    window[cb] = (arr) => {
+      try { const imported = (arr || []).map((j) => JSON.parse(j)); const byId = new Map(rows.map((r) => [r.id, r])); imported.forEach((r) => byId.set(r.id, r)); edited.current = true; setRows(Array.from(byId.values())); saveRows(Array.from(byId.values())); flash("Loaded " + imported.length + " row(s) from Google Sheet"); }
+      catch (e) { flash("Could not read sheet data"); }
+      delete window[cb]; if (el.parentNode) el.parentNode.removeChild(el);
+    };
+    el.src = gsUrl + (gsUrl.indexOf("?") >= 0 ? "&" : "?") + "callback=" + cb + "&t=" + Date.now();
+    el.onerror = () => { flash("Pull failed — check the URL & deployment access"); delete window[cb]; };
+    document.body.appendChild(el);
+  };
+  const saveGsUrl = () => { const u = gsDraft.trim(); setGsUrl(u); localStorage.setItem("attendance:gsurl", u); setSyncStatus(u ? "ok" : "idle"); flash(u ? "Google Sheet linked" : "Sync turned off"); };
+
+  useEffect(() => {
+    if (!gsUrl || !edited.current) return;
+    clearTimeout(syncTimer.current);
+    setSyncStatus("pending");
+    syncTimer.current = setTimeout(() => pushToSheet(), 1000);
+    return () => clearTimeout(syncTimer.current);
+  }, [rows, gsUrl]);
+  const SYNC = { idle: ["Not linked", "#8A93A6"], pending: ["Syncing\u2026", "#C08A2D"], syncing: ["Syncing\u2026", "#C08A2D"], ok: ["Synced", "#16A34A"], error: ["Sync error", "#B23A3A"] };
+
+  const agentSortVal = (a) => {
+    if (dSortKey === "name") return (a.name || "").toLowerCase();
+    if (dSortKey === "campaign") return (a.campaign || "").toLowerCase();
+    if (dSortKey === "attendance") return rate(a) == null ? -1 : rate(a);
+    if (dSortKey === "shrinkage") return shrink(a) == null ? -1 : shrink(a);
+    if (dSortKey === "sched") return a.sched;
+    if (dSortKey === "absent") return a.absent;
+    if (dSortKey === "early") return a.early;
+    if (dSortKey === "tardy") return a.tardy;
+    if (dSortKey === "tardyCount") return a.tardyCount;
+    if (dSortKey === "loss") return loss(a);
+    return 0;
+  };
+  const sortAgents = useMemo(() => {
+    const arr = [...byAgent].sort((x, y) => { const vx = agentSortVal(x), vy = agentSortVal(y); const c = vx < vy ? -1 : vx > vy ? 1 : 0; return dSortDir === "asc" ? c : -c; });
+    return arr;
+  }, [byAgent, dSortKey, dSortDir]);
+  const groupedAgents = useMemo(() => {
+    const map = new Map();
+    byAgent.forEach((a) => { const key = a.campaign || "—"; if (!map.has(key)) map.set(key, []); map.get(key).push(a); });
+    const cmp = (x, y) => { const vx = agentSortVal(x), vy = agentSortVal(y); const c = vx < vy ? -1 : vx > vy ? 1 : 0; return dSortDir === "asc" ? c : -c; };
+    return Array.from(map.keys()).sort((a, b) => a.localeCompare(b)).map((camp) => ({ campaign: camp, agents: [...map.get(camp)].sort(cmp) }));
+  }, [byAgent, dSortKey, dSortDir]);
+  const dToggle = (k) => { if (dSortKey === k) setDSortDir(dSortDir === "asc" ? "desc" : "asc"); else { setDSortKey(k); setDSortDir(k === "name" || k === "campaign" ? "asc" : "desc"); } };
+
+  /* agents who hit 60+ tardy minutes or 6+ tardy counts within a single month */
+  const tardyFlags = useMemo(() => {
+    const map = new Map();
+    dRows.forEach((r) => {
+      const dv = monthOf(r);
+      if (!dv.month || dv.year === "") return;
+      const t = num(r.tardy);
+      const key = (r.name || "—") + "|" + dv.month + "|" + dv.year;
+      if (!map.has(key)) map.set(key, { name: r.name || "—", campaign: r.campaign || "", month: dv.month, year: dv.year, tardyMin: 0, tardyCount: 0 });
+      const o = map.get(key);
+      if (r.campaign && !o.campaign) o.campaign = r.campaign;
+      if (t > 0) { o.tardyMin += t; o.tardyCount += 1; }
+    });
+    return Array.from(map.values())
+      .filter((o) => o.tardyMin >= 60 || o.tardyCount >= 6)
+      .sort((a, b) => b.tardyMin - a.tardyMin || b.tardyCount - a.tardyCount);
+  }, [dRows]);
+
+  const pct = (x) => (x == null ? "—" : (x * 100).toFixed(1) + "%");
+  const wholePct = (x) => (x == null ? "\u2014" : (x >= 0.9995 ? 100 : Math.min(99, Math.round(x * 100))) + "%");
+  const rateColor = (x) => (x == null ? "#B7BCC8" : x >= 0.9995 ? "#166534" : x >= 0.95 ? "#16A34A" : x >= 0.90 ? "#D97706" : "#DC2626");
+  const kpiTier = (x) => (x == null ? null : x >= 0.9995 ? 5 : x >= 0.95 ? 3 : x >= 0.90 ? 2 : 1);
+  const tierBadge = (x) => { const t = kpiTier(x); if (t == null) return null; const c = rateColor(x); return <span title={"KPI tier " + t} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, borderRadius: "50%", background: c, color: "#fff", fontSize: 10, fontWeight: 800, marginLeft: 6, verticalAlign: "middle" }}>{t}</span>; };
+  const shrinkColor = (x) => (x == null ? "#B7BCC8" : x <= 0.02 ? "#1F7A4D" : x <= 0.05 ? "#3E9B6B" : x <= 0.1 ? "#C08A2D" : "#B23A3A");
+
+  const SEL = { padding: "8px 10px", border: "1px solid #D6D9E0", borderRadius: 8, fontSize: 13.5, background: "#fff", fontFamily: "inherit" };
+  const lbl = { fontSize: 11.5, fontWeight: 600, color: "#8A93A6", marginBottom: 3 };
+  const DTh = ({ k, children, style }) => (
+    <th onClick={() => dToggle(k)} style={{ cursor: "pointer", userSelect: "none", ...style }}>
+      {children}<span style={{ opacity: dSortKey === k ? 1 : 0.3, marginLeft: 4, fontSize: 10 }}>{dSortKey === k ? (dSortDir === "asc" ? "\u25b2" : "\u25bc") : "\u2195"}</span>
+    </th>
+  );
+  const shiftOptions = useMemo(() => Array.from(new Set(["OFF", "NOT YET HIRED", ...rows.map((r) => (r.shift || "").trim()).filter(Boolean)])).sort(), [rows]);
+  const nameOptions = useMemo(() => Array.from(new Set(rows.map((r) => (r.name || "").trim()).filter(Boolean))).sort(), [rows]);
+  const CAP = 3000;
+  const fz = (left, w) => ({ position: "sticky", left, minWidth: w, width: w, zIndex: 1, background: "#fff" });
+  const fzh = (left, w) => ({ position: "sticky", left, minWidth: w, width: w, zIndex: 3, background: "#F8FAFC" });
+  const SelectCell = ({ value, options, onChange, placeholder, left }) => {
+    const v = value || "";
+    const known = options.includes(v);
+    return (
+      <select className={"cell" + (left ? " l" : "")} value={v} style={{ color: v === "OFF" ? "#9AA1AC" : undefined }} onChange={(e) => { const nv = e.target.value; if (nv === "__other__") { const x = window.prompt("Enter " + (placeholder || "value")); if (x != null && x.trim() !== "") onChange(x.trim()); } else onChange(nv); }}>
+        <option value="">{placeholder || "\u2014"}</option>
+        {!known && v !== "" && <option value={v}>{v}</option>}
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+        <option value="__other__">{"\u2795 Add new\u2026"}</option>
+      </select>
+    );
+  };
+  const pill = (x, color) => <span className="mono" style={{ display: "inline-block", minWidth: 58, padding: "4px 0", borderRadius: 999, fontSize: 12.5, fontWeight: 700, color: "#fff", background: x == null ? "#C9CBD1" : color }}>{x == null ? "—" : (x * 100).toFixed(1) + "%"}</span>;
+
+  const teamAgents = new Set(byAgent.map((a) => a.name)).size;
+  const Donut = ({ label, sub, value }) => {
+    const R = 34, C = 2 * Math.PI * R, v = value == null ? 0 : value, col = rateColor(value);
+    return (
+      <div className="kpi" style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <svg width="82" height="82" viewBox="0 0 84 84" style={{ flexShrink: 0 }}>
+          <circle cx="42" cy="42" r={R} fill="none" stroke="#EEF1F4" strokeWidth="9" />
+          <circle cx="42" cy="42" r={R} fill="none" stroke={col} strokeWidth="9" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={C * (1 - v)} transform="rotate(-90 42 42)" />
+          <text x="42" y="47" textAnchor="middle" fontSize="16" fontWeight="800" fill={col} fontFamily="inherit">{wholePct(value)}</text>
+        </svg>
+        <div style={{ minWidth: 0 }}>
+          <div className="kpi-label">{label}</div>
+          <div style={{ fontSize: 12.5, color: "#6B7280", marginTop: 5 }}>{sub}</div>
+        </div>
+      </div>
+    );
+  };
+  const TrendChart = ({ data }) => {
+    const W = 760, H = 190, padX = 30, padTop = 18, padBot = 26;
+    const n = data.length;
+    const xs = (i) => padX + (n <= 1 ? (W - 2 * padX) / 2 : (i * (W - 2 * padX) / (n - 1)));
+    const ys = (v) => padTop + (1 - v) * (H - padTop - padBot);
+    const pts = data.map((m, i) => ({ x: xs(i), y: ys(rate(m) == null ? 0 : rate(m)), m }));
+    const path = pts.map((p, i) => (i ? "L" : "M") + p.x.toFixed(1) + " " + p.y.toFixed(1)).join(" ");
+    return (
+      <svg viewBox={"0 0 " + W + " " + H} width="100%" style={{ display: "block" }}>
+        {[0, 0.25, 0.5, 0.75, 1].map((g) => (<g key={g}><line x1={padX} x2={W - padX} y1={ys(g)} y2={ys(g)} stroke="#EEF1F4" /><text x={padX - 6} y={ys(g) + 3} textAnchor="end" fontSize="9" fill="#B7BCC8">{Math.round(g * 100)}</text></g>))}
+        <path d={path} fill="none" stroke="#2563EB" strokeWidth="2.5" strokeLinejoin="round" />
+        {pts.map((p, i) => (<g key={i}><circle cx={p.x} cy={p.y} r="3.5" fill="#fff" stroke="#2563EB" strokeWidth="2" /><text x={p.x} y={p.y - 9} textAnchor="middle" fontSize="9.5" fontWeight="700" fill="#4A5264">{rate(p.m) == null ? "" : wholePct(rate(p.m))}</text><text x={p.x} y={H - 8} textAnchor="middle" fontSize="10" fill="#8A93A6">{p.m.label}</text></g>))}
+      </svg>
+    );
+  };
+
+  return (
+    <div style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif", background: "#F5F6F8", minHeight: "100vh", color: "#1C2230" }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        .mono { font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+        input, select { font-family: inherit; color:#1A1D23; }
+        .btn { border:1px solid transparent; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; background:#2563EB; color:#fff; transition:background .15s, border-color .15s; }
+        .btn:hover { background:#1D4ED8; }
+        .btn:active { transform: translateY(1px); }
+        .btn:disabled { opacity:.5; cursor:not-allowed; }
+        .ghost { background:#fff; border:1px solid #D8DCE2; color:#374151; }
+        .ghost:hover { background:#F3F4F6; border-color:#C7CCD4; }
+        .pilltab { padding:6px 14px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid transparent; white-space:nowrap; background:transparent; color:#64748B; transition:all .12s; }
+        table.grid { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
+        table.grid thead th { position:sticky; top:0; z-index:2; background:#F8FAFC; color:#64748B; font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; font-weight:700; padding:11px 8px; text-align:center; white-space:nowrap; border-bottom:1px solid #E6E8EC; }
+        table.grid thead th.left { text-align:left; }
+        table.grid tbody td { border-bottom:1px solid #F1F3F5; padding:5px 8px; text-align:center; color:#1A1D23; }
+        table.grid tbody tr:hover td { background:#F8FAFC; }
+        td.calc { background:#F8FAFC !important; color:#64748B; font-weight:600; }
+        .cell { width:100%; min-width:52px; padding:7px 6px; border:1px solid transparent; border-radius:6px; font-size:13px; background:transparent; outline:none; text-align:center; color:#1A1D23; }
+        .cell:hover { border-color:#E1E4EA; background:#fff; }
+        .cell:focus { border-color:#2563EB; background:#fff; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+        .cell.l { text-align:left; }
+        .num { text-align:center; }
+        .kpi { background:#fff; border:1px solid #E6E8EC; border-radius:10px; padding:16px 18px; }
+        .kpi-top { display:flex; align-items:center; gap:8px; }
+        .kpi-dot { width:8px; height:8px; border-radius:999px; display:inline-block; }
+        .kpi-label { font-size:11px; text-transform:uppercase; letter-spacing:.6px; font-weight:700; color:#6B7280; }
+        .kpi-num { font-size:30px; font-weight:800; margin-top:8px; letter-spacing:-.5px; }
+        @media (max-width:820px){ .tiles{grid-template-columns:1fr 1fr!important} }
+      `}</style>
+
+      {/* header */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #E6E8EC", padding: "0 24px" }}>
+        <div style={{ maxWidth: 1360, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, padding: "14px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg, #2563EB, #16A34A)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 2px 6px rgba(37,99,235,.28)" }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="3" y="4.5" width="18" height="16" rx="3" stroke="#fff" strokeWidth="1.8" />
+                <path d="M3 9.5H21" stroke="#fff" strokeWidth="1.8" />
+                <path d="M8 2.5V6.5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
+                <path d="M16 2.5V6.5" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
+                <path d="M8.2 14.3L10.6 16.6L15.6 12" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#111827", letterSpacing: "-.3px" }}>Attendance Hub</div>
+              <div style={{ fontSize: 12.5, color: "#6B7280", marginTop: 2 }}>{new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 2, background: "#F1F3F5", padding: 3, borderRadius: 9 }}>
+              {[["tracker", "Tracker"], ["dashboard", "Dashboard"]].map(([k, l]) => (
+                <button key={k} onClick={() => setView(k)} className="pilltab" style={{ background: view === k ? "#fff" : "transparent", color: view === k ? "#111827" : "#64748B", boxShadow: view === k ? "0 1px 2px rgba(0,0,0,.06)" : "none" }}>{l}</button>
+              ))}
+            </div>
+            <button className="btn ghost" onClick={() => setShowSync(true)} title="Link a Google Sheet" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: SYNC[syncStatus][1], display: "inline-block" }} />
+              {gsUrl ? (syncStatus === "ok" && lastSync ? "Synced " + lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : SYNC[syncStatus][0]) : "Google Sheet"}
+            </button>
+            <button className="btn ghost" onClick={() => fileRef.current && fileRef.current.click()}>Import</button>
+            <button className="btn" onClick={exportXLSX}>Export to Excel</button>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={(e) => e.target.files[0] && importXLSX(e.target.files[0])} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1360, margin: "0 auto", padding: "24px 24px 48px" }}>
+        {view === "tracker" && (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end", marginBottom: 14 }}>
+              <div><div style={lbl}>Month</div><select style={SEL} value={fMonth} onChange={(e) => setFMonth(e.target.value)}><option value="all">All months</option>{MONTHS.map((m) => <option key={m}>{m}</option>)}</select></div>
+              <div><div style={lbl}>Year</div><select style={SEL} value={fYear} onChange={(e) => setFYear(e.target.value)}><option value="all">All</option>{yearsList.map((y) => <option key={y}>{y}</option>)}</select></div>
+              <div><div style={lbl}>Date</div><div style={{ display: "flex", gap: 4, alignItems: "center" }}><input type="date" style={SEL} value={fDate} onChange={(e) => setFDate(e.target.value)} />{fDate && <button className="btn ghost" style={{ padding: "7px 9px" }} onClick={() => setFDate("")} title="Clear date">{"\u00d7"}</button>}</div></div>
+              <div><div style={lbl}>Campaign</div><select style={SEL} value={fCampaign} onChange={(e) => setFCampaign(e.target.value)}><option value="all">All campaigns</option>{campaigns.map((c) => <option key={c}>{c}</option>)}</select></div>
+              <div style={{ minWidth: 180 }}><div style={lbl}>Agent</div><select style={{ ...SEL, width: "100%" }} value={fAgent} onChange={(e) => setFAgent(e.target.value)}><option value="all">All agents</option>{nameOptions.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12.5, color: "#8A93A6" }}>{trackerRows.length} row(s)</span>
+                <button className="btn ghost" onClick={openNewAgent}>+ New agent</button>
+                <button className="btn ghost" onClick={openGen}>Generate schedule</button>
+              </div>
+            </div>
+
+
+            <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ overflowX: "auto", maxHeight: "68vh" }}>
+                <table className="grid">
+                  <thead>
+                    <tr>
+                      <th style={{ ...fzh(0, 26), textAlign: "center" }}><input type="checkbox" checked={trackerRows.slice(0, CAP).length > 0 && trackerRows.slice(0, CAP).every((r) => selected.has(r.id))} onChange={toggleSelectAll} style={{ width: 14, height: 14, cursor: "pointer" }} /></th>
+                      <th className="left" style={fzh(26, 34)}>#</th>
+                      <th className="left" style={fzh(60, 150)}>Names</th>
+                      <th style={{ ...fzh(210, 96), boxShadow: "2px 0 5px rgba(0,0,0,.08)" }}>Date</th>
+                      <th>Day</th>
+                      <th className="left" style={{ minWidth: 120 }}>Campaign</th>
+                      <th style={{ minWidth: 120 }}>Shift</th>
+                      <th>Scheduled</th><th title="Tick = full-day absent">Absent</th><th>Tardy</th><th>Early Out</th><th title="Tick = full-day leave">Leave</th>
+                      <th>OT</th>
+                      <th>Minutes</th><th style={{ width: 30 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trackerRows.length === 0 ? (
+                      <tr><td colSpan={15} style={{ padding: "40px 20px", color: "#8A93A6" }}>No rows for this filter. Click <b>+ Add row</b>, <b>Generate schedule</b>, or <b>Import</b> your sheet.</td></tr>
+                    ) : trackerRows.slice(0, CAP).map((r, i) => {
+                      const d = dOf(r);
+                      const isToday = r.date === todayYMD();
+                      return (
+                        <tr key={r.id} style={isToday ? { background: "#F0FBF4" } : undefined}>
+                          <td style={{ ...fz(0, 26), textAlign: "center", background: selected.has(r.id) ? "#EAF3FF" : (isToday ? "#F0FBF4" : "#fff") }}><input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleSelect(r.id)} style={{ width: 14, height: 14, cursor: "pointer" }} /></td>
+                          <td className="mono" style={{ ...fz(26, 34), color: "#B7BCC8", fontSize: 11, background: isToday ? "#F0FBF4" : undefined }}>{i + 1}</td>
+                          <td className="l" style={{ ...fz(60, 150), background: isToday ? "#EAF7EF" : "#F1F3F6", color: "#1C2230", fontWeight: 600, fontSize: 13, paddingLeft: 8, textAlign: "left" }}>{r.name || "\u2014"}</td>
+                          <td className="mono" style={{ ...fz(210, 96), background: isToday ? "#EAF7EF" : "#F1F3F6", color: "#4A5264", fontSize: 12, boxShadow: "2px 0 5px rgba(0,0,0,.08)" }}>
+                            {isToday && <span title="Today" className="today-dot" style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "#16A34A", marginRight: 6, verticalAlign: "middle" }} />}
+                            {fmtMDY(r.date) || "\u2014"}
+                          </td>
+                          <td className="calc" style={{ fontSize: 12 }}>{d.day || "\u2014"}</td>
+                          <td><SelectCell left value={r.campaign} options={campaigns} placeholder="Campaign" onChange={(v) => setCell(r.id, "campaign", v)} /></td>
+                          <td><SelectCell value={r.shift} options={shiftOptions} placeholder="Shift" onChange={(v) => setCell(r.id, "shift", v)} /></td>
+                          {d.schedBad
+                            ? <td title="Shift text can't be read as a time range" style={{ background: "#FDECEC", color: "#B23A3A", fontSize: 11, fontWeight: 600 }}>check shift</td>
+                            : <td className="calc mono" title={d.sched == null ? "" : d.sched + " min scheduled"}>{d.sched == null ? "\u2014" : <span style={{ color: "#16A34A", fontWeight: 700, fontSize: 14 }}>{"\u2713"}</span>}</td>}
+                          <td><input type="checkbox" checked={num(r.absent) > 0} disabled={d.sched == null || num(r.leave) > 0} onChange={(e) => setCell(r.id, "absent", e.target.checked ? String(d.sched) : "")} style={{ width: 16, height: 16, accentColor: "#DC2626", cursor: d.sched == null || num(r.leave) > 0 ? "not-allowed" : "pointer" }} /></td>
+                          <td>{d.sched == null ? null : <input className="cell" inputMode="numeric" value={r.tardy || ""} onChange={(e) => setCell(r.id, "tardy", e.target.value)} onKeyDown={onCellKey} />}</td>
+                          <td>{d.sched == null ? null : <input className="cell" inputMode="numeric" value={r.earlyout || ""} onChange={(e) => setCell(r.id, "earlyout", e.target.value)} onKeyDown={onCellKey} />}</td>
+                          <td><input type="checkbox" checked={num(r.leave) > 0} disabled={d.sched == null || num(r.absent) > 0} onChange={(e) => setCell(r.id, "leave", e.target.checked ? String(d.sched) : "")} style={{ width: 16, height: 16, accentColor: "#16A34A", cursor: d.sched == null || num(r.absent) > 0 ? "not-allowed" : "pointer" }} /></td>
+                          <td>{d.sched == null ? null : <input className="cell" inputMode="numeric" value={r.ot || ""} onChange={(e) => setCell(r.id, "ot", e.target.value)} onKeyDown={onCellKey} />}</td>
+                          <td className="calc mono">{d.minutes == null ? "\u2014" : d.minutes}</td>
+                          <td><button onClick={() => delRow(r.id)} title="Delete" style={{ border: "none", background: "none", color: "#C4CBD8", cursor: "pointer", fontSize: 15 }}>{"\u00d7"}</button></td>
+                        </tr>
+                      );
+                    })}
+                    {trackerRows.length > CAP && (
+                      <tr><td colSpan={15} style={{ padding: "10px 14px", color: "#8A93A6", fontSize: 12.5, background: "#FFF8E6" }}>Showing the first {CAP} of {trackerRows.length} rows — narrow the Month / Year / Campaign filters to see the rest.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ padding: 10, borderTop: "1px solid #EEF0F3", display: "flex", alignItems: "center", gap: 12 }}>
+                <button className="btn" onClick={addRow} style={{ background: "#2563EB", color: "#fff" }}>+ Add row</button>
+                <span style={{ fontSize: 12, color: "#9AA1AC" }}>Changes save automatically on this device.</span>
+                <button className="btn ghost" onClick={clearAll} style={{ color: "#B23A3A", marginLeft: "auto" }}>Clear all</button>
+                {selected.size > 0 && <button className="btn ghost" onClick={() => { setBatchShift(""); setBatchCampaign(""); setShowBatch(true); }}>Batch edit schedule ({selected.size})</button>}
+                {selected.size > 0 && <button className="btn ghost" onClick={() => markSelected("off")}>Mark OFF</button>}
+                {selected.size > 0 && <button className="btn ghost" onClick={() => markSelected("absent")}>Mark Absent</button>}
+                {selected.size > 0 && <button className="btn ghost" onClick={() => markSelected("leave")}>Mark Leave</button>}
+                {selected.size > 0 && <button className="btn ghost" onClick={() => markSelected("clear")}>Clear day</button>}
+                {selected.size > 0 && <button className="btn" onClick={delSelected} style={{ background: "#B23A3A", color: "#fff" }}>Delete selected ({selected.size})</button>}
+                <span style={{ fontSize: 12, color: "#8A93A6" }}>Grey columns calculate automatically · everything auto-saves in this browser.</span>
+              </div>
+            </div>
+          </>
+        )}
+
+        {view === "dashboard" && (
+          <>
+            <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+              <div><div style={lbl}>Month</div><select style={SEL} value={dMonth} onChange={(e) => setDMonth(e.target.value)}><option value="all">All</option>{MONTHS.map((m) => <option key={m}>{m}</option>)}</select></div>
+              <div><div style={lbl}>Year</div><select style={SEL} value={dYear} onChange={(e) => setDYear(e.target.value)}><option value="all">All</option>{yearsList.map((y) => <option key={y}>{y}</option>)}</select></div>
+              <div><div style={lbl}>Campaign</div><select style={SEL} value={dCampaign} onChange={(e) => setDCampaign(e.target.value)}><option value="all">All campaigns</option>{campaigns.map((c) => <option key={c}>{c}</option>)}</select></div>
+              <div style={{ minWidth: 180 }}><div style={lbl}>Agent</div><select style={{ ...SEL, width: "100%" }} value={dAgent} onChange={(e) => setDAgent(e.target.value)}><option value="all">All agents</option>{nameOptions.map((n) => <option key={n} value={n}>{n}</option>)}</select></div>
+              {(dMonth !== "all" || dYear !== "all" || dCampaign !== "all" || dAgent !== "all") && <button className="btn ghost" onClick={() => { setDMonth("all"); setDYear("all"); setDCampaign("all"); setDAgent("all"); }}>Clear</button>}
+              <button className="btn" onClick={exportDash} style={{ background: "#2563EB", color: "#fff", marginLeft: "auto" }}>Export dashboard</button>
+            </div>
+
+            <div className="tiles" style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 16 }}>
+              <Donut label="Team attendance" sub={teamAgents + " agents \u00b7 all campaigns"} value={overall.sched > 0 ? rate(overall) : null} />
+              {byCampaign.slice().sort((a, b) => (a.campaign || "").localeCompare(b.campaign || "")).map((c) => (
+                <Donut key={c.campaign} label={(c.campaign || "\u2014") + " attendance"} sub={c.agentCount + " agent" + (c.agentCount === 1 ? "" : "s")} value={c.sched > 0 ? rate(c) : null} />
+              ))}
+            </div>
+
+            {byMonth.length >= 2 && (
+              <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, padding: "14px 16px 8px", marginBottom: 14 }}>
+                <div style={{ fontWeight: 800, fontSize: 14 }}>Attendance trend</div>
+                <div style={{ fontSize: 12, color: "#8A93A6", marginBottom: 8 }}>Team attendance rate by month</div>
+                <TrendChart data={byMonth} />
+              </div>
+            )}
+
+            {/* tardy policy critical flags */}
+            {dMonth !== "all" && tardyFlags.length > 0 && (
+              <div style={{ background: "#FDEDED", border: "1px solid #E8A3A3", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #E8A3A3", fontWeight: 800, fontSize: 14, color: "#8A1F1F", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>{"\u26a0\ufe0f"}</span> Tardy policy alert — {tardyFlags.length} agent-month{tardyFlags.length === 1 ? "" : "s"} over threshold
+                </div>
+                <div style={{ padding: "8px 16px 2px", fontSize: 12, color: "#8A1F1F" }}>Flagged when an agent reaches <b>60 minutes of tardy</b> or <b>6 tardy counts</b> within a single month.</div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="grid">
+                    <thead><tr><th className="left">Agent</th><th className="left">Campaign</th><th className="left">Month</th><th>Tardy Min</th><th>Tardy Ct</th></tr></thead>
+                    <tbody>
+                      {tardyFlags.map((f) => (
+                        <tr key={f.name + "|" + f.month + "|" + f.year}>
+                          <td className="left" style={{ fontWeight: 600, paddingLeft: 10 }}>{f.name}</td>
+                          <td className="left" style={{ color: "#5A6070", paddingLeft: 10 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: campColor(f.campaign), display: "inline-block", marginRight: 6 }} />{f.campaign || "—"}</td>
+                          <td className="left" style={{ paddingLeft: 10 }}>{f.month} {f.year}</td>
+                          <td className="mono" style={{ fontWeight: 800, color: f.tardyMin >= 60 ? "#B23A3A" : "#3A4152" }}>{mins(f.tardyMin)}</td>
+                          <td className="mono" style={{ fontWeight: 800, color: f.tardyCount >= 6 ? "#B23A3A" : "#3A4152" }}>{f.tardyCount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* per campaign */}
+            {dMonth === "all" && (
+            <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #EEF0F3", fontWeight: 800, fontSize: 14 }}>By month</div>
+              <div style={{ overflowX: "auto" }}>
+                <table className="grid">
+                  <thead><tr><th className="left">Month</th><th>Scheduled</th><th>Loss Min</th><th>Attendance</th><th>Shrinkage</th></tr></thead>
+                  <tbody>
+                    {byMonth.length === 0 ? (<tr><td colSpan={5} style={{ padding: "24px", color: "#8A93A6" }}>No data for these filters.</td></tr>) :
+                      byMonth.map((a) => (
+                        <tr key={a.key}>
+                          <td className="left" style={{ fontWeight: 600, paddingLeft: 10 }}>{a.label}</td>
+                          <td className="mono">{mins(a.sched)}</td>
+                          <td className="mono" style={{ color: "#B23A3A" }}>{mins(loss(a))}</td>
+                          <td>{pill(rate(a), rateColor(rate(a)))}</td>
+                          <td className="mono" style={{ fontWeight: 600, color: "#4A5264" }}>{pct(shrink(a))}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            )}
+
+            <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #EEF0F3", fontWeight: 800, fontSize: 14 }}>By campaign</div>
+              <div style={{ overflowX: "auto" }}>
+                <table className="grid">
+                  <thead><tr><th className="left">Campaign</th><th>Agents</th><th>Scheduled</th><th>Absent</th><th>Early Out</th><th>Tardy</th><th>Tardy Ct</th><th>Loss Min</th><th>Leave</th><th>Attendance</th><th>Shrinkage</th></tr></thead>
+                  <tbody>
+                    {byCampaign.length === 0 ? (<tr><td colSpan={11} style={{ padding: "30px", color: "#8A93A6" }}>No data for these filters.</td></tr>) :
+                      byCampaign.sort((a, b) => (rate(b) ?? -1) - (rate(a) ?? -1)).map((a) => (
+                        <tr key={a.campaign}>
+                          <td className="left" style={{ fontWeight: 600, paddingLeft: 10 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: campColor(a.campaign), display: "inline-block", marginRight: 6 }} />{a.campaign}</td>
+                          <td className="mono">{a.agentCount}</td>
+                          <td className="mono">{mins(a.sched)}</td>
+                          <td className="mono">{mins(a.absent)}</td><td className="mono">{mins(a.early)}</td><td className="mono">{mins(a.tardy)}</td><td className="mono">{a.tardyCount}</td>
+                          <td className="mono" style={{ color: "#B23A3A" }}>{mins(loss(a))}</td>
+                          <td className="mono" style={{ color: "#8A93A6" }}>{mins(a.leave)}</td>
+                          <td>{pill(rate(a), rateColor(rate(a)))}</td>
+                          <td className="mono" style={{ fontWeight: 600, color: "#4A5264" }}>{pct(shrink(a))}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* per agent */}
+            <div style={{ background: "#fff", border: "1px solid #E6E8EC", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "12px 16px", borderBottom: "1px solid #EEF0F3", fontWeight: 800, fontSize: 14 }}>By agent</div>
+              <div style={{ overflowX: "auto", maxHeight: "60vh" }}>
+                <table className="grid">
+                  <thead><tr>
+                    <DTh k="name" style={{ textAlign: "left" }}>Agent</DTh>
+                    <DTh k="campaign" style={{ textAlign: "left" }}>Campaign</DTh>
+                    <th>Days</th><DTh k="sched">Scheduled</DTh>
+                    <DTh k="absent">Absent</DTh><DTh k="early">Early Out</DTh><DTh k="tardy">Tardy</DTh><DTh k="tardyCount">Tardy Ct</DTh><DTh k="loss">Loss Min</DTh><th>Leave</th>
+                    <DTh k="attendance">Attendance</DTh><DTh k="shrinkage">Shrinkage</DTh>
+                  </tr></thead>
+                  <tbody>
+                    {groupedAgents.length === 0 ? (<tr><td colSpan={12} style={{ padding: "30px", color: "#8A93A6" }}>No data for these filters.</td></tr>) :
+                      groupedAgents.map((grp) => (
+                        <React.Fragment key={grp.campaign}>
+                          <tr>
+                            <td colSpan={12} style={{ textAlign: "left", padding: "8px 10px", background: "#EEF0F3", fontWeight: 800, fontSize: 12.5, color: "#3A4152" }}>
+                              <span style={{ width: 8, height: 8, borderRadius: 2, background: campColor(grp.campaign), display: "inline-block", marginRight: 6 }} />
+                              {grp.campaign} <span style={{ fontWeight: 600, color: "#8A93A6" }}>({grp.agents.length} agent{grp.agents.length === 1 ? "" : "s"})</span>
+                            </td>
+                          </tr>
+                          {grp.agents.map((a, i) => (
+                            <tr key={a.name + "|" + a.campaign + i}>
+                              <td className="left" style={{ fontWeight: 600, paddingLeft: 10 }}><button onClick={() => setShowAgent({ name: a.name, campaign: a.campaign })} style={{ border: "none", background: "none", color: "#2563EB", cursor: "pointer", font: "inherit", fontWeight: 600, padding: 0, textAlign: "left" }}>{a.name}</button></td>
+                              <td className="left" style={{ color: "#5A6070", paddingLeft: 10 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: campColor(a.campaign), display: "inline-block", marginRight: 6 }} />{a.campaign || "—"}</td>
+                              <td className="mono">{a.days}</td>
+                              <td className="mono">{mins(a.sched)}</td>
+                              <td className="mono">{mins(a.absent)}</td><td className="mono">{mins(a.early)}</td><td className="mono">{mins(a.tardy)}</td><td className="mono">{a.tardyCount}</td>
+                              <td className="mono" style={{ color: "#B23A3A" }}>{mins(loss(a))}</td>
+                              <td className="mono" style={{ color: "#8A93A6" }}>{mins(a.leave)}</td>
+                              <td>{pill(rate(a), rateColor(rate(a)))}{dMonth !== "all" && tierBadge(rate(a))}</td>
+                              <td className="mono" style={{ fontWeight: 600, color: "#4A5264" }}>{pct(shrink(a))}</td>
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      ))}
+                    {sortAgents.length > 0 && (
+                      <tr style={{ borderTop: "2px solid #141A26" }}>
+                        <td className="left" style={{ fontWeight: 800, paddingLeft: 10 }}>Grand Total</td>
+                        <td></td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{overall.days}</td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{mins(overall.sched)}</td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{mins(overall.absent)}</td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{mins(overall.early)}</td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{mins(overall.tardy)}</td>
+                        <td className="mono" style={{ fontWeight: 700 }}>{overall.tardyCount}</td>
+                        <td className="mono" style={{ fontWeight: 800, color: "#B23A3A" }}>{mins(loss(overall))}</td>
+                        <td className="mono" style={{ fontWeight: 700, color: "#8A93A6" }}>{mins(overall.leave)}</td>
+                        <td>{pill(rate(overall), rateColor(rate(overall)))}</td>
+                        <td className="mono" style={{ fontWeight: 700, color: "#4A5264" }}>{pct(shrink(overall))}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div style={{ fontSize: 12, color: "#8A93A6", marginTop: 12, lineHeight: 1.6 }}>
+              All figures in <b>minutes</b>. <b>Loss = Absent + Early Out + Tardy</b>. <b>Attendance = (Scheduled − Loss) ÷ Scheduled</b>. <b>Shrinkage = 100% − Attendance</b>. Leave is tracked but not counted as loss. OFF / “not yet hired” days are excluded; OT is not counted.
+            </div>
+          </>
+        )}
+      </div>
+
+      {showBatch && (
+        <div onClick={() => setShowBatch(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px", overflowY: "auto" }}>
+          <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 12, maxWidth: 460, width: "100%", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>Batch edit schedule</div>
+              <button onClick={() => setShowBatch(false)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
+            </div>
+            <div style={{ fontSize: 13, color: "#4A5264", lineHeight: 1.55, marginBottom: 14 }}>Apply to the <b>{selected.size}</b> selected row(s). Leave a field on \u201cKeep current\u201d to not change it.</div>
+            <div style={{ marginBottom: 12 }}><div style={lbl}>Shift</div><select style={{ ...SEL, width: "100%" }} value={batchShift} onChange={(e) => setBatchShift(e.target.value)}><option value="">Keep current</option>{shiftOptions.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
+            <div><div style={lbl}>Campaign</div><select style={{ ...SEL, width: "100%" }} value={batchCampaign} onChange={(e) => setBatchCampaign(e.target.value)}><option value="">Keep current</option>{campaigns.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+            <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setShowBatch(false)}>Cancel</button>
+              <button className="btn" onClick={applyBatch} disabled={!batchShift && !batchCampaign}>Apply</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGen && (
+        <div onClick={() => setShowGen(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px", overflowY: "auto" }}>
+          <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 14, maxWidth: 520, width: "100%", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>Generate schedule</div>
+              <button onClick={() => setShowGen(false)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
+            </div>
+            <div style={{ fontSize: 13, color: "#4A5264", lineHeight: 1.55, marginBottom: 14 }}>Fills the target month for each agent using their usual shift on each weekday (rest days included). Everything stays editable afterward.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div><div style={lbl}>Target month</div><select style={{ ...SEL, width: "100%" }} value={genMonth} onChange={(e) => setGenMonth(e.target.value)}>{MONTHS.map((m) => <option key={m}>{m}</option>)}</select></div>
+              <div><div style={lbl}>Year</div><input style={{ ...SEL, width: "100%" }} value={genYear} onChange={(e) => setGenYear(e.target.value)} /></div>
+              <div><div style={lbl}>Agents in campaign</div><select style={{ ...SEL, width: "100%" }} value={genCampaign} onChange={(e) => setGenCampaign(e.target.value)}><option value="all">All campaigns</option>{campaigns.map((c) => <option key={c}>{c}</option>)}</select></div>
+              <div><div style={lbl}>Base pattern on</div><select style={{ ...SEL, width: "100%" }} value={genSource} onChange={(e) => setGenSource(e.target.value)}><option value="all">All history</option>{monthsAvailable.map((m) => <option key={m.key} value={m.key}>{m.key}</option>)}</select></div>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, fontSize: 13, color: "#3A4152", cursor: "pointer" }}>
+              <input type="checkbox" checked={genSkip} onChange={(e) => setGenSkip(e.target.checked)} /> Skip agent-days that already have a row
+            </label>
+            <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setShowGen(false)}>Cancel</button>
+              <button className="btn" onClick={generate}>Generate</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNewAgent && (
+        <div onClick={() => setShowNewAgent(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 16px", overflowY: "auto" }}>
+          <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 14, maxWidth: 520, width: "100%", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>New agent</div>
+              <button onClick={() => setShowNewAgent(false)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
+            </div>
+            <div style={{ fontSize: 13, color: "#4A5264", lineHeight: 1.55, marginBottom: 14 }}>Creates a full month of rows for a brand-new agent (no history needed). Pick the working shift and tick which days are OFF — rest days can be any days of the week. Everything stays editable afterward.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div style={{ gridColumn: "1 / -1" }}><div style={lbl}>Agent name</div><input style={{ ...SEL, width: "100%" }} placeholder="Last, First" value={naName} onChange={(e) => setNaName(e.target.value)} /></div>
+              <div><div style={lbl}>Campaign</div><input style={{ ...SEL, width: "100%" }} list="campaign-list" placeholder="Campaign" value={naCampaign} onChange={(e) => setNaCampaign(e.target.value)} /><datalist id="campaign-list">{campaigns.map((c) => <option key={c} value={c} />)}</datalist></div>
+              <div><div style={lbl}>Target month</div><select style={{ ...SEL, width: "100%" }} value={naMonth} onChange={(e) => setNaMonth(e.target.value)}>{MONTHS.map((m) => <option key={m}>{m}</option>)}</select></div>
+              <div><div style={lbl}>Year</div><input style={{ ...SEL, width: "100%" }} value={naYear} onChange={(e) => setNaYear(e.target.value)} /></div>
+              <div style={{ gridColumn: "1 / -1" }}><div style={lbl}>Working shift</div><input style={{ ...SEL, width: "100%" }} list="shift-list" placeholder="e.g. 9:00AM-6:00PM" value={naShift} onChange={(e) => setNaShift(e.target.value)} /><datalist id="shift-list">{shiftOptions.map((s) => <option key={s} value={s} />)}</datalist></div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <div style={lbl}>Rest days (OFF)</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, wd) => { const on = naRest.includes(wd); return (
+                    <button key={wd} type="button" className="pilltab" onClick={() => setNaRest((p) => (on ? p.filter((x) => x !== wd) : [...p, wd]))} style={{ border: "1px solid " + (on ? "#2563EB" : "#D8DCE2"), background: on ? "#EAF1FF" : "#fff", color: on ? "#1D4ED8" : "#64748B", minWidth: 46 }}>{d}</button>
+                  ); })}
+                </div>
+                <div style={{ fontSize: 11.5, color: "#8A93A6", marginTop: 6 }}>Ticked days are set to OFF; every other day uses the working shift.</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setShowNewAgent(false)}>Cancel</button>
+              <button className="btn" style={{ background: "#C08A2D", color: "#fff" }} onClick={addNewAgent}>Add agent</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSync && (
+        <div onClick={() => setShowSync(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 16px", overflowY: "auto" }}>
+          <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 14, maxWidth: 640, width: "100%", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>Sync to Google Sheets</div>
+              <button onClick={() => setShowSync(false)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
+            </div>
+            <div style={{ fontSize: 13, color: "#4A5264", lineHeight: 1.55 }}>Every change auto-syncs to an <b>Attendance</b> tab (plus a hidden <b>_state</b> tab used to load data back onto other devices).</div>
+            <div style={{ marginTop: 14, fontWeight: 700, fontSize: 13 }}>Web app URL</div>
+            <input style={{ width: "100%", padding: "9px 11px", border: "1px solid #D6D9E0", borderRadius: 8, fontSize: 13, marginTop: 5 }} placeholder="https://script.google.com/macros/s/\u2026/exec" value={gsDraft} onChange={(e) => setGsDraft(e.target.value)} />
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+              <button className="btn" style={{ background: "#2563EB", color: "#fff" }} onClick={saveGsUrl}>Save link</button>
+              <button className="btn ghost" onClick={() => pushToSheet()} disabled={!gsUrl}>Push now</button>
+              <button className="btn ghost" onClick={() => pullFromSheet()} disabled={!gsUrl}>Pull from Sheet</button>
+              {gsUrl && <button className="btn ghost" onClick={() => { setGsDraft(""); setGsUrl(""); localStorage.removeItem("attendance:gsurl"); setSyncStatus("idle"); }}>Disconnect</button>}
+            </div>
+            <div style={{ marginTop: 18, fontWeight: 700, fontSize: 13 }}>One-time setup</div>
+            <ol style={{ fontSize: 12.5, color: "#4A5264", lineHeight: 1.6, paddingLeft: 18, marginTop: 6 }}>
+              <li>In your Google Sheet: <b>Extensions \u25b8 Apps Script</b>.</li>
+              <li>Delete anything there, paste the script below, <b>Save</b>.</li>
+              <li><b>Deploy \u25b8 New deployment \u25b8 Web app</b>. Execute as <b>Me</b>, access <b>Anyone</b>. Authorize.</li>
+              <li>Copy the <b>Web app URL</b>, paste it above, then <b>Save link</b>.</li>
+            </ol>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+              <div style={{ fontSize: 12, color: "#8A93A6" }}>Apps Script code</div>
+              <button className="btn ghost" style={{ padding: "5px 12px", fontSize: 12 }} onClick={() => { navigator.clipboard && navigator.clipboard.writeText(APPS_SCRIPT); flash("Script copied"); }}>Copy</button>
+            </div>
+            <textarea readOnly value={APPS_SCRIPT} style={{ width: "100%", height: 150, marginTop: 6, fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 11, border: "1px solid #E6E8EC", borderRadius: 8, padding: 10, background: "#FAFBFC", whiteSpace: "pre", overflow: "auto" }} />
+            <div style={{ marginTop: 10, fontSize: 11.5, color: "#8A93A6" }}>On a fresh device, use <b>Pull from Sheet</b> first. Auto-push only starts after you make an edit, so a blank browser won't wipe the sheet. \u201cAnyone\u201d access means anyone with the URL can write \u2014 keep it private.</div>
+          </div>
+        </div>
+      )}
+
+      {showAgent && (() => {
+        const rowsA = dRows.filter((r) => (r.name || "\u2014") === showAgent.name && (r.campaign || "") === showAgent.campaign).slice().sort((a, b) => ((a.date || "") < (b.date || "") ? -1 : 1));
+        const acc = blank(); rowsA.forEach((r) => addInto(acc, r));
+        return (
+          <div onClick={() => setShowAgent(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 16px", overflowY: "auto" }}>
+            <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 12, maxWidth: 780, width: "100%", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                <div><div style={{ fontSize: 17, fontWeight: 800 }}>{showAgent.name}</div><div style={{ fontSize: 12.5, color: "#6B7280", marginTop: 2 }}>{showAgent.campaign || "\u2014"}</div></div>
+                <button onClick={() => setShowAgent(null)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
+              </div>
+              <div style={{ display: "flex", gap: 22, margin: "12px 0 14px", flexWrap: "wrap" }}>
+                <div><div style={{ fontSize: 11, color: "#8A93A6", textTransform: "uppercase", fontWeight: 700 }}>Attendance</div><div className="mono" style={{ fontSize: 20, fontWeight: 800, color: rateColor(rate(acc)) }}>{pct(rate(acc))}</div></div>
+                <div><div style={{ fontSize: 11, color: "#8A93A6", textTransform: "uppercase", fontWeight: 700 }}>Shrinkage</div><div className="mono" style={{ fontSize: 20, fontWeight: 800, color: "#4A5264" }}>{pct(shrink(acc))}</div></div>
+                <div><div style={{ fontSize: 11, color: "#8A93A6", textTransform: "uppercase", fontWeight: 700 }}>Days</div><div className="mono" style={{ fontSize: 20, fontWeight: 800 }}>{acc.days}</div></div>
+                <div><div style={{ fontSize: 11, color: "#8A93A6", textTransform: "uppercase", fontWeight: 700 }}>Loss min</div><div className="mono" style={{ fontSize: 20, fontWeight: 800, color: "#B23A3A" }}>{mins(loss(acc))}</div></div>
+              </div>
+              <div style={{ overflowX: "auto", maxHeight: "50vh" }}>
+                <table className="grid">
+                  <thead><tr><th className="left">Date</th><th>Day</th><th className="left">Shift</th><th>Absent</th><th>Tardy</th><th>Early Out</th><th>Leave</th><th>Minutes</th></tr></thead>
+                  <tbody>
+                    {rowsA.length === 0 ? (<tr><td colSpan={8} style={{ padding: "24px", color: "#8A93A6" }}>No rows for this agent in the current filter.</td></tr>) :
+                      rowsA.map((r) => { const d = dOf(r); return (
+                        <tr key={r.id}>
+                          <td className="left" style={{ paddingLeft: 10 }}>{fmtMDY(r.date)}</td>
+                          <td>{d.day}</td>
+                          <td className="left" style={{ paddingLeft: 10, color: /^off$/i.test((r.shift || "").trim()) ? "#9AA1AC" : undefined }}>{r.shift || "\u2014"}</td>
+                          <td className="mono">{num(r.absent) > 0 ? mins(num(r.absent)) : ""}</td>
+                          <td className="mono">{num(r.tardy) > 0 ? mins(num(r.tardy)) : ""}</td>
+                          <td className="mono">{num(r.earlyout) > 0 ? mins(num(r.earlyout)) : ""}</td>
+                          <td className="mono">{num(r.leave) > 0 ? mins(num(r.leave)) : ""}</td>
+                          <td className="mono">{d.minutes == null ? "\u2014" : d.minutes}</td>
+                        </tr>
+                      ); })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {toast && (
+        <div style={{ position: "fixed", bottom: 22, left: "50%", transform: "translateX(-50%)", background: "#141A26", color: "#fff", padding: "11px 18px", borderRadius: 10, fontSize: 13.5, fontWeight: 600, boxShadow: "0 8px 24px rgba(0,0,0,.25)", zIndex: 50, display: "flex", alignItems: "center", gap: 14 }}>
+          <span>{toast.msg}</span>
+          {toast.fn && <button onClick={() => { toast.fn(); setToast(null); }} style={{ border: "1px solid #5A6070", background: "transparent", color: "#8FE3D6", fontWeight: 700, borderRadius: 7, padding: "4px 10px", cursor: "pointer", fontSize: 12.5 }}>{toast.actionLabel || "Undo"}</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<AttendanceApp />);
+
+</script>
+</body>
+</html>
