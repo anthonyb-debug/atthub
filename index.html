@@ -605,7 +605,8 @@ function AttendanceApp() {
       .sort((a, b) => b.tardyMin - a.tardyMin || b.tardyCount - a.tardyCount);
   }, [dRows]);
 
-  const pct = (x) => (x == null ? "—" : (x * 100).toFixed(1) + "%");
+  const pctVal = (x) => (x >= 1 ? 100 : Math.min(99.9, Math.round(x * 1000) / 10)); // never round up to 100 unless loss is truly 0
+  const pct = (x) => (x == null ? "—" : pctVal(x).toFixed(1) + "%");
   const wholePct = (x) => (x == null ? "\u2014" : (x >= 0.9995 ? 100 : Math.min(99, Math.round(x * 100))) + "%");
   const rateColor = (x) => (x == null ? "#B7BCC8" : x >= 0.9995 ? "#166534" : x >= 0.95 ? "#16A34A" : x >= 0.90 ? "#D97706" : "#DC2626");
   const kpiTier = (x) => (x == null ? null : x >= 0.9995 ? 5 : x >= 0.95 ? 3 : x >= 0.90 ? 2 : 1);
@@ -636,7 +637,7 @@ function AttendanceApp() {
       </select>
     );
   };
-  const pill = (x, color) => <span className="mono" style={{ display: "inline-block", minWidth: 58, padding: "4px 0", borderRadius: 999, fontSize: 12.5, fontWeight: 700, color: "#fff", background: x == null ? "#C9CBD1" : color }}>{x == null ? "—" : (x * 100).toFixed(1) + "%"}</span>;
+  const pill = (x, color) => <span className="mono" style={{ display: "inline-block", minWidth: 58, padding: "4px 0", borderRadius: 999, fontSize: 12.5, fontWeight: 700, color: "#fff", background: x == null ? "#C9CBD1" : color }}>{x == null ? "—" : pctVal(x).toFixed(1) + "%"}</span>;
 
   const teamAgents = new Set(byAgent.map((a) => a.name)).size;
   const Donut = ({ label, sub, value }) => {
