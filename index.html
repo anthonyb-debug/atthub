@@ -162,6 +162,7 @@ function AttendanceApp() {
   const fileRef = useRef();
   const edited = useRef(false);
   const saveTimer = useRef();
+  const autoPulled = useRef(false);
   const rowsRef = useRef([]);
   const [gsUrl, setGsUrl] = useState("");
   const [gsDraft, setGsDraft] = useState("");
@@ -207,7 +208,7 @@ function AttendanceApp() {
   const [naShift, setNaShift] = useState("");
   const [naRest, setNaRest] = useState([0, 6]);
 
-  useEffect(() => { setRows(loadRows()); const u = localStorage.getItem("attendance:gsurl") || DEFAULT_GS_URL; setGsUrl(u); setGsDraft(u); }, []);
+  useEffect(() => { setRows(loadRows()); const u = DEFAULT_GS_URL; setGsUrl(u); setGsDraft(u); localStorage.setItem("attendance:gsurl", u); }, []);
   useEffect(() => { setSelected(new Set()); }, [fMonth, fYear, fCampaign, fAgent, fDate]);
   useEffect(() => { const flush = () => { clearTimeout(saveTimer.current); try { localStorage.setItem(GKEY, JSON.stringify(rowsRef.current)); } catch (e) {} }; window.addEventListener("beforeunload", flush); return () => window.removeEventListener("beforeunload", flush); }, []);
   useEffect(() => {
@@ -538,17 +539,27 @@ function AttendanceApp() {
     try { await fetch(gsUrl, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(buildSyncPayload()) }); setSyncStatus("ok"); setLastSync(new Date()); }
     catch (e) { setSyncStatus("error"); }
   };
-  const pullFromSheet = () => {
-    if (!gsUrl) return flash("Link a Google Sheet first");
+  const pullFromSheet = (opts) => {
+    const silent = !!(opts && opts.silent);
+    if (!gsUrl) { if (!silent) flash("Link a Google Sheet first"); return; }
+    setSyncStatus("syncing");
     const cb = "__attPull_" + Date.now();
     const el = document.createElement("script");
     window[cb] = (arr) => {
-      try { const imported = (arr || []).map((j) => JSON.parse(j)); const byId = new Map(rows.map((r) => [r.id, r])); imported.forEach((r) => byId.set(r.id, r)); edited.current = true; setRows(Array.from(byId.values())); saveRows(Array.from(byId.values())); flash("Loaded " + imported.length + " row(s) from Google Sheet"); }
-      catch (e) { flash("Could not read sheet data"); }
+      try {
+        const imported = (arr || []).map((j) => JSON.parse(j));
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        imported.forEach((r) => byId.set(r.id, r));
+        const merged = Array.from(byId.values());
+        if (!silent) edited.current = true;   // silent auto-pull shouldn't trigger an immediate re-push
+        setRows(merged); rowsRef.current = merged; saveRows(merged);
+        setSyncStatus("ok"); setLastSync(new Date());
+        if (!silent) flash("Loaded " + imported.length + " row(s) from Google Sheet");
+      } catch (e) { setSyncStatus("error"); if (!silent) flash("Could not read sheet data"); }
       delete window[cb]; if (el.parentNode) el.parentNode.removeChild(el);
     };
     el.src = gsUrl + (gsUrl.indexOf("?") >= 0 ? "&" : "?") + "callback=" + cb + "&t=" + Date.now();
-    el.onerror = () => { flash("Pull failed — check the URL & deployment access"); delete window[cb]; };
+    el.onerror = () => { setSyncStatus("error"); if (!silent) flash("Pull failed — check the URL & deployment access"); delete window[cb]; };
     document.body.appendChild(el);
   };
   const saveGsUrl = () => { const u = gsDraft.trim(); setGsUrl(u); localStorage.setItem("attendance:gsurl", u); setSyncStatus(u ? "ok" : "idle"); flash(u ? "Google Sheet linked" : "Sync turned off"); };
@@ -560,6 +571,11 @@ function AttendanceApp() {
     syncTimer.current = setTimeout(() => pushToSheet(), 1000);
     return () => clearTimeout(syncTimer.current);
   }, [rows, gsUrl]);
+  useEffect(() => {
+    if (autoPulled.current || !gsUrl) return;
+    autoPulled.current = true;
+    pullFromSheet({ silent: true });
+  }, [gsUrl]);
   const SYNC = { idle: ["Not linked", "#8A93A6"], pending: ["Syncing\u2026", "#C08A2D"], syncing: ["Syncing\u2026", "#C08A2D"], ok: ["Synced", "#16A34A"], error: ["Sync error", "#B23A3A"] };
 
   const agentSortVal = (a) => {
@@ -728,10 +744,10 @@ function AttendanceApp() {
                 <button key={k} onClick={() => setView(k)} className="pilltab" style={{ background: view === k ? "#fff" : "transparent", color: view === k ? "#111827" : "#64748B", boxShadow: view === k ? "0 1px 2px rgba(0,0,0,.06)" : "none" }}>{l}</button>
               ))}
             </div>
-            <button className="btn ghost" onClick={() => setShowSync(true)} title="Link a Google Sheet" style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+            <span title="Auto-syncing to Google Sheet" style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#6B7280", padding: "0 4px", userSelect: "none" }}>
               <span style={{ width: 8, height: 8, borderRadius: 999, background: SYNC[syncStatus][1], display: "inline-block" }} />
-              {gsUrl ? (syncStatus === "ok" && lastSync ? "Synced " + lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : SYNC[syncStatus][0]) : "Google Sheet"}
-            </button>
+              {syncStatus === "ok" && lastSync ? "Synced " + lastSync.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : SYNC[syncStatus][0]}
+            </span>
             <button className="btn ghost" onClick={() => fileRef.current && fileRef.current.click()}>Import</button>
             <button className="btn" onClick={exportXLSX}>Export to Excel</button>
             <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={(e) => e.target.files[0] && importXLSX(e.target.files[0])} />
@@ -1062,39 +1078,6 @@ function AttendanceApp() {
               <button className="btn ghost" onClick={() => setShowNewAgent(false)}>Cancel</button>
               <button className="btn" style={{ background: "#C08A2D", color: "#fff" }} onClick={addNewAgent}>Add agent</button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {showSync && (
-        <div onClick={() => setShowSync(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,26,38,.5)", zIndex: 60, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 16px", overflowY: "auto" }}>
-          <div onClick={(ev) => ev.stopPropagation()} style={{ background: "#fff", borderRadius: 14, maxWidth: 640, width: "100%", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.3)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <div style={{ fontSize: 17, fontWeight: 800 }}>Sync to Google Sheets</div>
-              <button onClick={() => setShowSync(false)} style={{ border: "none", background: "none", fontSize: 20, color: "#8A93A6", cursor: "pointer" }}>{"\u00d7"}</button>
-            </div>
-            <div style={{ fontSize: 13, color: "#4A5264", lineHeight: 1.55 }}>Every change auto-syncs to an <b>Attendance</b> tab (plus a hidden <b>_state</b> tab used to load data back onto other devices).</div>
-            <div style={{ marginTop: 14, fontWeight: 700, fontSize: 13 }}>Web app URL</div>
-            <input style={{ width: "100%", padding: "9px 11px", border: "1px solid #D6D9E0", borderRadius: 8, fontSize: 13, marginTop: 5 }} placeholder="https://script.google.com/macros/s/\u2026/exec" value={gsDraft} onChange={(e) => setGsDraft(e.target.value)} />
-            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-              <button className="btn" style={{ background: "#2563EB", color: "#fff" }} onClick={saveGsUrl}>Save link</button>
-              <button className="btn ghost" onClick={() => pushToSheet()} disabled={!gsUrl}>Push now</button>
-              <button className="btn ghost" onClick={() => pullFromSheet()} disabled={!gsUrl}>Pull from Sheet</button>
-              {gsUrl && <button className="btn ghost" onClick={() => { setGsDraft(""); setGsUrl(""); localStorage.removeItem("attendance:gsurl"); setSyncStatus("idle"); }}>Disconnect</button>}
-            </div>
-            <div style={{ marginTop: 18, fontWeight: 700, fontSize: 13 }}>One-time setup</div>
-            <ol style={{ fontSize: 12.5, color: "#4A5264", lineHeight: 1.6, paddingLeft: 18, marginTop: 6 }}>
-              <li>In your Google Sheet: <b>Extensions \u25b8 Apps Script</b>.</li>
-              <li>Delete anything there, paste the script below, <b>Save</b>.</li>
-              <li><b>Deploy \u25b8 New deployment \u25b8 Web app</b>. Execute as <b>Me</b>, access <b>Anyone</b>. Authorize.</li>
-              <li>Copy the <b>Web app URL</b>, paste it above, then <b>Save link</b>.</li>
-            </ol>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
-              <div style={{ fontSize: 12, color: "#8A93A6" }}>Apps Script code</div>
-              <button className="btn ghost" style={{ padding: "5px 12px", fontSize: 12 }} onClick={() => { navigator.clipboard && navigator.clipboard.writeText(APPS_SCRIPT); flash("Script copied"); }}>Copy</button>
-            </div>
-            <textarea readOnly value={APPS_SCRIPT} style={{ width: "100%", height: 150, marginTop: 6, fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 11, border: "1px solid #E6E8EC", borderRadius: 8, padding: 10, background: "#FAFBFC", whiteSpace: "pre", overflow: "auto" }} />
-            <div style={{ marginTop: 10, fontSize: 11.5, color: "#8A93A6" }}>On a fresh device, use <b>Pull from Sheet</b> first. Auto-push only starts after you make an edit, so a blank browser won't wipe the sheet. \u201cAnyone\u201d access means anyone with the URL can write \u2014 keep it private.</div>
           </div>
         </div>
       )}
