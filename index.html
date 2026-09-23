@@ -2556,6 +2556,7 @@ function AttendanceApp() {
         ),
     );
   };
+  const [naSort, setNaSort] = useState({ k: null, d: "desc" });
   const prevInfo = useMemo(() => {
       if (u === "tracker" || I === "all" || nt === "all") return null;
       let mi = MONTHS.indexOf(I) - 1,
@@ -2734,7 +2735,36 @@ function AttendanceApp() {
         x.near = near;
         items.push(x);
       });
-      items.sort((a, b) => b.level - a.level || b.late - a.late || b.lateMin - a.lateMin || b.absD - a.absD || a.name.localeCompare(b.name));
+      const sevSort = (a, b) => b.level - a.level || b.late - a.late || b.lateMin - a.lateMin || b.absD - a.absD || a.name.localeCompare(b.name);
+      items.sort((a, b) => {
+        if (naSort.k) {
+          const c = naSort.k === "name" ? a.name.localeCompare(b.name) : a[naSort.k] - b[naSort.k];
+          if (c !== 0) return naSort.d === "asc" ? c : -c;
+        }
+        return sevSort(a, b);
+      });
+      const naTh = (k2, label, left) =>
+        React.createElement(
+          "th",
+          { key: k2, className: left ? "l" : void 0, "aria-sort": naSort.k === k2 ? (naSort.d === "asc" ? "ascending" : "descending") : void 0 },
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "rt-sort" + (naSort.k === k2 ? " on" : ""),
+              title: naSort.k === k2 && naSort.d === (k2 === "name" ? "desc" : "asc") ? "Click to go back to priority order" : "Sort by " + label.toLowerCase(),
+              onClick: () =>
+                setNaSort((p) => {
+                  const first = k2 === "name" ? "asc" : "desc";
+                  if (p.k !== k2) return { k: k2, d: first };
+                  if (p.d === first) return { k: k2, d: first === "asc" ? "desc" : "asc" };
+                  return { k: null, d: "desc" };
+                }),
+            },
+            label,
+            React.createElement("span", { className: "rt-caret", "aria-hidden": "true" }, naSort.k === k2 ? (naSort.d === "asc" ? "\u25b2" : "\u25bc") : ""),
+          ),
+        );
       const nOver = items.filter((x) => x.over).length,
         nNear = items.filter((x) => x.near).length,
         nAbs = items.filter((x) => x.absD > 0).length;
@@ -2744,7 +2774,17 @@ function AttendanceApp() {
         React.createElement(
           "div",
           { className: "panel-h" },
-          React.createElement("h2", null, "Needs attention"),
+          React.createElement(
+            "div",
+            { style: { display: "flex", alignItems: "baseline", gap: 10 } },
+            React.createElement("h2", null, "Needs attention"),
+            naSort.k &&
+              React.createElement(
+                "button",
+                { type: "button", className: "tb-clear", style: { fontSize: 12 }, onClick: () => setNaSort({ k: null, d: "desc" }) },
+                "Reset to priority order",
+              ),
+          ),
           React.createElement(
             "div",
             { className: "na-sum" },
@@ -2766,13 +2806,13 @@ function AttendanceApp() {
                   React.createElement(
                     "tr",
                     null,
-                    React.createElement("th", { className: "l" }, "Agent"),
+                    naTh("name", "Agent", !0),
                     React.createElement("th", { className: "l" }, "Campaign"),
                     nt === "all" && React.createElement("th", { className: "l" }, "Year"),
                     React.createElement("th", { className: "l" }, "Status"),
-                    React.createElement("th", null, "Late arrivals"),
-                    React.createElement("th", null, "Minutes late"),
-                    React.createElement("th", null, "Absent days"),
+                    naTh("late", "Late arrivals"),
+                    naTh("lateMin", "Minutes late"),
+                    naTh("absD", "Absent days"),
                     React.createElement("th", { className: "l" }, "Note"),
                   ),
                 ),
@@ -3677,6 +3717,8 @@ function AttendanceApp() {
         table.grid tbody td { white-space: nowrap; }
         .trk-scroll table.grid thead th { background: var(--bg-panel); }
         select.cell { -webkit-appearance: none; appearance: none; padding-right: 18px; cursor: pointer; background-repeat: no-repeat; background-position: calc(100% - 7px) 50%; background-size: 8px 5px; }
+        select.cell:hover, select.cell:focus { background-color: var(--bg-panel); background-repeat: no-repeat; background-position: calc(100% - 7px) 50%; background-size: 8px 5px; }
+        .mrow-shift select.cell { background-repeat: no-repeat; background-position: calc(100% - 7px) 50%; background-size: 8px 5px; }
         select.cell:hover, select.cell:focus { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M1 1l3 3 3-3' fill='none' stroke='%238A93A6' stroke-width='1.4'/%3E%3C/svg%3E"); }
         select.cell:disabled { cursor: default; }
         @media (max-width: 1360px) { .tb-sub { display: none; } .fsel-agent { max-width: 160px; } }
