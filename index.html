@@ -3294,7 +3294,7 @@ function AttendanceApp() {
       }
       if (lv > 0) {
         a.leaveD++; a.leaveMin += lv; tot.leaveD++; tot.leaveMin += lv;
-        const ty = String(r.leaveType || "").trim() || "Unspecified";
+        const ty = String(r.leaveType || "").trim() || "Planned Leave";
         a.types.set(ty, (a.types.get(ty) || 0) + 1);
         types.set(ty, (types.get(ty) || 0) + 1);
         if (kind === "leave") { log.push({ r: r, d: d, v: lv, ty: ty }); r.date > a.last && (a.last = r.date); }
