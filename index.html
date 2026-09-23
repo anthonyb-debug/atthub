@@ -2346,6 +2346,13 @@ function AttendanceApp() {
     colsRef = useRef();
   useEffect(() => { try { localStorage.setItem("attendance:hideOff", hideOff ? "1" : "0"); } catch (e) {} }, [hideOff]);
   useEffect(() => {
+    if (!O) return;
+    const [yy, mm] = O.split("-"),
+      monthOk = K === "all" || MONTHS[+mm - 1] === K,
+      yearOk = X === "all" || String(yy) === String(X);
+    (monthOk && yearOk) || It("");
+  }, [K, X]);
+  useEffect(() => {
     const el = document.querySelector("header.tb");
     if (!el || !window.ResizeObserver) return;
     const ro = new ResizeObserver(() => document.documentElement.style.setProperty("--tb-real", el.offsetHeight + "px"));
@@ -3294,7 +3301,7 @@ function AttendanceApp() {
       }
       if (lv > 0) {
         a.leaveD++; a.leaveMin += lv; tot.leaveD++; tot.leaveMin += lv;
-        const ty = String(r.leaveType || "").trim() || "Planned Leave";
+        const ty = String(r.leaveType || "").trim() || "Unspecified";
         a.types.set(ty, (a.types.get(ty) || 0) + 1);
         types.set(ty, (types.get(ty) || 0) + 1);
         if (kind === "leave") { log.push({ r: r, d: d, v: lv, ty: ty }); r.date > a.last && (a.last = r.date); }
