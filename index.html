@@ -142,6 +142,13 @@ function waiverOf(u) {
   if (!(num(u.tardy) > 0)) return null;
   return u.tardyWaived === "1" || u.tardyWaived === !0 ? { kind: "row", reason: u.waiveReason || "Waived" } : null;
 }
+function pctRound(t) {
+  let r = Math.round(t * 1e4 + 1e-9) / 100;
+  t < 1 && r >= 100 && (r = 99.99);
+  t < 0.95 && r >= 95 && (r = 94.99);
+  t < 0.9 && r >= 90 && (r = 89.99);
+  return r;
+}
 function tardyCounted(u) {
   return waiverOf(u) ? 0 : num(u.tardy);
 }
@@ -1283,13 +1290,14 @@ function AttendanceApp() {
           : s.filter((t) => {
               const n = monthOf(t);
               return (
+                (!t.date || t.date < todayYMD()) &&
                 (I === "all" || n.month === I) &&
                 (nt === "all" || String(n.year) === String(nt)) &&
                 (ot === "all" || (t.campaign || "") === ot) &&
                 (at === "all" || (t.name || "") === at)
               );
             }),
-      [s, u, I, nt, ot, at],
+      [s, u, I, nt, ot, at, todayYMD()],
     ),
     G = () => ({
       sched: 0,
@@ -1307,7 +1315,7 @@ function AttendanceApp() {
     }),
     H = (t, n) => {
       const e = lt(n);
-      if (e.sched == null) return;
+      if (e.sched == null || (n.date && n.date >= todayYMD())) return;
       ((t.sched += e.sched),
         (t.absent += num(n.absent)),
         (t.early += num(n.earlyout)),
@@ -1758,13 +1766,13 @@ function AttendanceApp() {
         ? "\u2014"
         : t >= 1
           ? "100%"
-          : (Math.floor(t * 1e4 + 1e-6) / 100).toFixed(2) + "%",
+          : pctRound(t).toFixed(2) + "%",
     be = (t) =>
       t == null
         ? "\u2014"
         : t >= 1
           ? "100%"
-          : (Math.floor(t * 1e4 + 1e-6) / 100).toFixed(2) + "%",
+          : pctRound(t).toFixed(2) + "%",
     J = (t) =>
       t == null
         ? "var(--text-faint2)"
@@ -2045,7 +2053,7 @@ function AttendanceApp() {
           ? "\u2014"
           : t >= 1
             ? "100%"
-            : (Math.floor(t * 1e4 + 1e-6) / 100).toFixed(2) + "%",
+            : pctRound(t).toFixed(2) + "%",
       ),
     qe = new Set(dt.map((t) => t.name)).size,
     xe = ({ label: t, sub: n, value: e, delta: o, big: a }) => {
@@ -3312,7 +3320,7 @@ function AttendanceApp() {
       React.createElement(
         "p",
         { className: "dash-foot" },
-        "Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave and waived tardiness are credited and not counted as loss; OFF days are excluded.",
+        "Counts completed days only, up to yesterday; today and later scheduled days aren\u2019t counted until they\u2019re over. Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave and waived tardiness are credited and not counted as loss; OFF days are excluded.",
       ),
     );
   };
@@ -6555,7 +6563,7 @@ root.render(React.createElement(AttendanceApp, null));
     <div class="gd-sec">
       <h3>3 · Dashboard metrics</h3>
       <div class="gd-f">Loss = Absent + Early&nbsp;Out + Tardy &nbsp;(Leave excluded)<br>Attendance&nbsp;% = (Scheduled &minus; Loss) &divide; Scheduled<br>Shrinkage&nbsp;% = Loss &divide; Scheduled</div>
-      <p class="gd-note">Totals roll up across the current filters (month, campaign, agent). Rest days (OFF) aren&rsquo;t scheduled, so they don&rsquo;t affect the percentages.</p>
+      <p class="gd-note">Totals roll up across the current filters (month, campaign, agent). Rest days (OFF) aren&rsquo;t scheduled, so they don&rsquo;t affect the percentages. Only completed days count: today and future scheduled days are left out until they&rsquo;re over, so a pre-generated schedule can&rsquo;t inflate the score.</p>
     </div>
 
     <div class="gd-sec">
