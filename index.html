@@ -123,7 +123,7 @@ function derive(u) {
   const g = u.date ? new Date(u.date + "T00:00:00") : null,
     h = g && !isNaN(g.getTime()),
     s = schedMin(u.shift),
-    m = num(u.absent) + num(u.tardy) + num(u.earlyout),
+    m = num(u.absent) + tardyCounted(u) + num(u.earlyout),
     y = s == null ? null : s - m,
     S = String(u.shift || "").trim(),
     A = !!(S && s == null && !/off/i.test(S) && !/not\s*yet\s*hired/i.test(S));
@@ -136,6 +136,14 @@ function derive(u) {
     minutes: y,
     schedBad: A,
   };
+}
+const WAIVE_REASONS = ["Inclement weather", "System or power outage", "Approved by team lead", "Other"];
+function waiverOf(u) {
+  if (!(num(u.tardy) > 0)) return null;
+  return u.tardyWaived === "1" || u.tardyWaived === !0 ? { kind: "row", reason: u.waiveReason || "Waived" } : null;
+}
+function tardyCounted(u) {
+  return waiverOf(u) ? 0 : num(u.tardy);
 }
 function buildProfiles(u) {
   const g = {};
@@ -353,7 +361,7 @@ function AttendanceApp() {
   const [u, g] = useState(() => {
       try {
         const v = localStorage.getItem("attendance:view");
-        return ["dashboard", "tracker", "tardy", "absence", "leave"].includes(v) ? v : "dashboard";
+        return ["dashboard", "tracker", "tardy", "absence", "leave", "waiver"].includes(v) ? v : "dashboard";
       } catch (e) {
         return "dashboard";
       }
@@ -493,6 +501,8 @@ function AttendanceApp() {
           Scheduled: o.sched == null ? "" : o.sched,
           Absent: e.absent || "",
           Tardy: e.tardy || "",
+          "Tardy Waived": waiverOf(e) ? "Yes" : "",
+          "Waive Reason": waiverOf(e) ? waiverOf(e).reason : "",
           "Early Out": e.earlyout || "",
           Leave: e.leave || "",
           OT: e.ot || "",
@@ -1167,6 +1177,8 @@ function AttendanceApp() {
             Scheduled: o.sched == null ? "" : o.sched,
             Absent: e.absent || "",
             Tardy: e.tardy || "",
+          "Tardy Waived": waiverOf(e) ? "Yes" : "",
+          "Waive Reason": waiverOf(e) ? waiverOf(e).reason : "",
             "Early Out": e.earlyout || "",
             Leave: e.leave || "",
             OT: e.ot || "",
@@ -1238,6 +1250,8 @@ function AttendanceApp() {
               name: String(a(l, ["names", "name"]) || ""),
               absent: a(l, ["absent"]),
               tardy: a(l, ["tardy"]),
+              tardyWaived: /^(y|yes|true|1|waived)$/i.test(String(a(l, ["tardy waived", "waived"]) || "").trim()) ? "1" : "",
+              waiveReason: String(a(l, ["waive reason", "waiver reason"]) || ""),
               earlyout: a(l, ["early out", "earlyout"]),
               leave: a(l, ["leave"]),
               leaveType: String(a(l, ["leave type", "leavetype"]) || ""),
@@ -1297,15 +1311,16 @@ function AttendanceApp() {
       ((t.sched += e.sched),
         (t.absent += num(n.absent)),
         (t.early += num(n.earlyout)),
-        (t.tardy += num(n.tardy)),
+        (t.tardy += tardyCounted(n)),
         (t.leave += num(n.leave)),
-        num(n.tardy) > 0 && (t.tardyCount += 1));
+        tardyCounted(n) > 0 && (t.tardyCount += 1),
+        waiverOf(n) && ((t.waived = (t.waived || 0) + num(n.tardy)), (t.waivedCount = (t.waivedCount || 0) + 1)));
       const o = num(n.absent) > 0,
         a = num(n.leave) > 0;
       (o && (t.absentD += 1),
         a && (t.leaveD += 1),
         !o && !a && (t.present += 1),
-        num(n.tardy) > 0 && (t.lateD += 1),
+        tardyCounted(n) > 0 && (t.lateD += 1),
         (t.ot += num(n.ot)),
         (t.days += 1));
     },
@@ -1485,6 +1500,8 @@ function AttendanceApp() {
             Scheduled: o.sched == null ? "" : o.sched,
             Absent: e.absent || "",
             Tardy: e.tardy || "",
+          "Tardy Waived": waiverOf(e) ? "Yes" : "",
+          "Waive Reason": waiverOf(e) ? waiverOf(e).reason : "",
             "Early Out": e.earlyout || "",
             Leave: e.leave || "",
             OT: e.ot || "",
@@ -1521,9 +1538,8 @@ function AttendanceApp() {
         o = document.createElement("script");
       ((window[e] = (a) => {
         try {
-          const p = (Array.isArray(a) ? a : (a && a.rows) || []).map((f) =>
-              JSON.parse(f),
-            ),
+          const pAll = (Array.isArray(a) ? a : (a && a.rows) || []).map((f) => JSON.parse(f)),
+            p = pAll.filter((f) => f && f.kind !== "waiver"),
             r = new Map(s.map((f) => [f.id, f]));
           p.forEach((f) => r.set(f.id, f));
           const l = Array.from(r.values());
@@ -1700,7 +1716,7 @@ function AttendanceApp() {
         N.forEach((n) => {
           const e = monthOf(n);
           if (!e.month || e.year === "") return;
-          const o = num(n.tardy),
+          const o = tardyCounted(n),
             a = (n.name || "\u2014") + "|" + e.month + "|" + e.year;
           t.has(a) ||
             t.set(a, {
@@ -2342,6 +2358,55 @@ function AttendanceApp() {
         navigator.clipboard.writeText(APPS_SCRIPT).then(() => b("Setup script copied"), () => b("Copy failed \u2014 select and copy manually"));
       } catch (e) { b("Copy failed"); }
     };
+  const [waivePop, setWaivePop] = useState(null),
+    [popReason, setPopReason] = useState({ reason: WAIVE_REASONS[0], note: "" });
+  const     reasonText = (r, note) => (r === "Other" ? (note || "").trim() || "Other" : r + ((note || "").trim() ? " \u2014 " + note.trim() : "")),
+    openWaivePop = (t, el) => {
+      const rc = el.getBoundingClientRect();
+      setPopReason({ reason: WAIVE_REASONS[0], note: "" });
+      setWaivePop({ id: t.id, x: Math.min(window.innerWidth - 300, Math.max(8, rc.left - 120)), y: rc.bottom + 6, up: rc.bottom + 260 > window.innerHeight, top: rc.top });
+    },
+    waiveRow = (id, reason) => {
+      F(s.map((o) => (o.id === id ? { ...o, tardyWaived: "1", waiveReason: reason, waivedAt: todayYMD() } : o)));
+      setWaivePop(null);
+      b("Tardy waived \u2014 still shown, no longer counted");
+    },
+    unwaiveRow = (id) => {
+      F(s.map((o) => (o.id === id ? { ...o, tardyWaived: "", waiveReason: "", waivedAt: "" } : o)));
+      setWaivePop(null);
+      b("Waiver removed");
+    },
+    _wvEnd = 0;
+  useEffect(() => {
+    if (!waivePop) return;
+    const h2 = (e) => !e.target.closest(".wv-pop") && !e.target.closest(".wv-btn") && setWaivePop(null),
+      k2 = (e) => e.key === "Escape" && setWaivePop(null);
+    document.addEventListener("mousedown", h2);
+    document.addEventListener("keydown", k2);
+    window.addEventListener("scroll", () => setWaivePop(null), { once: !0, capture: !0 });
+    return () => (document.removeEventListener("mousedown", h2), document.removeEventListener("keydown", k2));
+  }, [waivePop]);
+  const waiveBtn = (t, mobile) => {
+    if (!(num(t.tardy) > 0)) return mobile ? null : React.createElement("span", { className: "wv-spacer", "aria-hidden": "true" });
+    const w = waiverOf(t);
+    return React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "wv-btn" + (w ? " on" : "") + (mobile ? " wv-btn-m" : ""),
+        title: w ? "Waived: " + w.reason : "Waive this tardy",
+        "aria-label": w ? "Tardy waived: " + w.reason : "Waive this tardy",
+        onClick: (e) => (waivePop && waivePop.id === t.id ? setWaivePop(null) : openWaivePop(t, e.currentTarget)),
+      },
+      React.createElement(
+        "svg",
+        { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" },
+        React.createElement("path", { d: "M12 3l7 3v5c0 4.4-3 8.3-7 9.5-4-1.2-7-5.1-7-9.5V6l7-3z", stroke: "currentColor", strokeWidth: "2", strokeLinejoin: "round" }),
+        w && React.createElement("path", { d: "M9 12l2 2 4-4", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }),
+      ),
+      mobile && React.createElement("span", null, w ? "Waived \u00b7 " + w.reason : "Waive"),
+    );
+  };
   const [hideOff, setHideOff] = useState(() => { try { return localStorage.getItem("attendance:hideOff") === "1"; } catch (e) { return !1; } }),
     [trCols, setTrCols] = useState(() => {
       try { return Object.assign({ early: !0, ot: !0 }, JSON.parse(localStorage.getItem("attendance:trCols") || "{}")); } catch (e) { return { early: !0, ot: !0 }; }
@@ -2435,19 +2500,20 @@ function AttendanceApp() {
       );
     },
     daySummary = (rows) => {
-      let sch = 0, abs = 0, late = 0, lv = 0, off = 0;
+      let sch = 0, abs = 0, late = 0, lv = 0, off = 0, wvc = 0;
       rows.forEach((t) => {
         const e = lt(t);
         if (e.sched == null) return void off++;
         sch++;
         num(t.absent) > 0 && abs++;
         num(t.leave) > 0 && lv++;
-        num(t.tardy) > 0 && late++;
+        num(t.tardy) > 0 && (waiverOf(t) ? wvc++ : late++);
       });
       return [
         [sch + " scheduled", ""],
         abs && [abs + " absent", "abs"],
         late && [late + " late", "late"],
+        wvc && [wvc + " waived", "wv"],
         lv && [lv + " on leave", "lv"],
         off && [off + " off", "off"],
       ].filter(Boolean);
@@ -2460,9 +2526,10 @@ function AttendanceApp() {
       linkF && (Pt(mo), jt(yr));
     },
     numInput = (t, e, k) => {
-      const err = fieldErr(t, e, k);
-      return React.createElement("input", {
-        className: "cell" + (err ? " cell-err" : "") + (k === "tardy" && num(t.tardy) > 0 && !err ? " cell-late" : ""),
+      const err = fieldErr(t, e, k),
+        wvd = k === "tardy" && waiverOf(t);
+      const inp = React.createElement("input", {
+        className: "cell" + (err ? " cell-err" : "") + (wvd && !err ? " cell-waived" : k === "tardy" && num(t.tardy) > 0 && !err ? " cell-late" : ""),
         inputMode: "numeric",
         placeholder: "\u2013",
         disabled: !h,
@@ -2473,6 +2540,7 @@ function AttendanceApp() {
         onChange: (a) => j(t.id, k, a.target.value),
         onKeyDown: rt,
       });
+      return k === "tardy" ? React.createElement("span", { className: "tcell" }, inp, waiveBtn(t)) : inp;
     },
     jumpToErr = () => {
       const el = document.querySelector(".cell-err");
@@ -2536,11 +2604,12 @@ function AttendanceApp() {
                     placeholder: "0",
                     disabled: !h,
                     value: t[k2] || "",
-                    className: err ? "cell-err" : k2 === "tardy" && num(t.tardy) > 0 ? "cell-late" : void 0,
+                    className: err ? "cell-err" : k2 === "tardy" && waiverOf(t) ? "cell-waived" : k2 === "tardy" && num(t.tardy) > 0 ? "cell-late" : void 0,
                     "aria-invalid": err ? "true" : void 0,
                     onChange: (a) => j(t.id, k2, a.target.value),
                   }),
                   err && React.createElement("small", null, err),
+                  k2 === "tardy" && waiveBtn(t, !0),
                 );
               }),
           ),
@@ -2606,7 +2675,7 @@ function AttendanceApp() {
     const d = rpRef.current;
     if (!d || (!d.rows.length && !d.log.length)) return b("Nothing to export for these filters");
     const cols = d.cfg.cols,
-      head = cols.map(([k, l]) => (k === "rate" ? l + " (%)" : k === "flag" ? "Status" : l)),
+      head = cols.map(([k, l]) => (k === "rate" ? l + " (%)" : k === "share" ? "Waived (%)" : k === "flag" ? "Status" : l)),
       body = d.rows.map((a) =>
         cols.map(([k]) =>
           k === "name" ? a.name
@@ -2614,13 +2683,13 @@ function AttendanceApp() {
           : k === "flag" ? (a.flag ? "Watchlist" : a.near ? "Approaching" : "OK")
           : k === "last" ? fmtMDY(a.last)
           : k === "types" ? d.cfg.cell(a, k)
-          : k === "rate" ? Math.round(d.cfg.val(a, k) * 1000) / 10
+          : k === "rate" || k === "share" ? Math.round(d.cfg.val(a, k) * 1000) / 10
           : Math.round(d.cfg.val(a, k) * 10) / 10,
         ),
       ),
-      logHead = ["Date", "Day", "Agent", "Campaign", "Shift"].concat(d.kind === "leave" ? ["Leave type"] : [], [d.cfg.logVal]),
+      logHead = ["Date", "Day", "Agent", "Campaign", "Shift"].concat(d.kind === "leave" ? ["Leave type"] : [], [d.cfg.logVal], d.kind === "tardy" ? ["Waived", "Waive reason"] : [], d.kind === "waiver" ? ["Reason", "Waived on"] : []),
       logBody = d.log.map((e) =>
-        [e.r.date, e.d.day, e.r.name || "", e.r.campaign || "", e.r.shift || ""].concat(d.kind === "leave" ? [e.ty] : [], [e.v]),
+        [e.r.date, e.d.day, e.r.name || "", e.r.campaign || "", e.r.shift || ""].concat(d.kind === "leave" ? [e.ty] : [], [e.v], d.kind === "tardy" ? [e.wv ? "Yes" : "", e.wv ? e.wv.reason : ""] : [], d.kind === "waiver" ? [e.wv.reason, e.r.waivedAt || ""] : []),
       ),
       wb = XLSX.utils.book_new(),
       ws1 = XLSX.utils.aoa_to_sheet([head].concat(body)),
@@ -2718,7 +2787,7 @@ function AttendanceApp() {
       },
       { l: "Shrinkage", v: q(shr), c: shrColor(shr), s: delta(shr, P1 && B(P1), "pts", !0) || React.createElement("span", null, "Loss \u00f7 scheduled") },
       { l: "Absent days", v: fmtN(E.absentD), s: delta(E.absentD, P1 && P1.absentD, "n", !0) || React.createElement("span", null, fmtN(E.absent) + " min lost") },
-      { l: "Late arrivals", v: fmtN(E.tardyCount), s: delta(E.tardyCount, P1 && P1.tardyCount, "n", !0) || React.createElement("span", null, fmtN(E.tardy) + " min late") },
+      { l: "Late arrivals", note: E.waivedCount ? E.waivedCount + " waived" : null, v: fmtN(E.tardyCount), s: delta(E.tardyCount, P1 && P1.tardyCount, "n", !0) || React.createElement("span", null, fmtN(E.tardy) + " min late") },
       { l: "Leave days", v: fmtN(E.leaveD), s: delta(E.leaveD, P1 && P1.leaveD, "n", !1) || React.createElement("span", null, "Credited, not a loss") },
     ];
     const kpiStrip = React.createElement(
@@ -2730,7 +2799,7 @@ function AttendanceApp() {
           { key: k.l, className: "dk-cell" },
           React.createElement("div", { className: "dk-l" }, k.l, k.extra),
           React.createElement("div", { className: "dk-v", style: k.c ? { color: k.c } : void 0, title: k.l === "Attendance" && ve(att) != null ? "KPI tier " + ve(att) : void 0 }, k.v),
-          React.createElement("div", { className: "dk-s" }, k.s),
+          React.createElement("div", { className: "dk-s" }, k.s, k.note && React.createElement("span", { className: "dk-note" }, " \u00b7 " + k.note)),
         ),
       ),
     );
@@ -2746,7 +2815,7 @@ function AttendanceApp() {
         am.has(key) ||
           am.set(key, { name: r.name || "\u2014", campaign: r.campaign || "", month: mo.month, year: mo.year, late: 0, lateMin: 0, absD: 0 });
         const x = am.get(key),
-          td = num(r.tardy);
+          td = tardyCounted(r);
         td > 0 && (x.late++, (x.lateMin += td));
         num(r.absent) > 0 && x.absD++;
       });
@@ -3243,13 +3312,13 @@ function AttendanceApp() {
       React.createElement(
         "p",
         { className: "dash-foot" },
-        "Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave is credited and not counted as loss; OFF days are excluded.",
+        "Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave and waived tardiness are credited and not counted as loss; OFF days are excluded.",
       ),
     );
   };
   const NAV_GROUPS = [
       { label: "Overview", items: [["dashboard", "Dashboard"], ["tracker", "Tracker"]] },
-      { label: "Reports", items: [["tardy", "Tardiness report"], ["absence", "Absence report"], ["leave", "Leave report"]] },
+      { label: "Reports", items: [["tardy", "Tardiness report"], ["absence", "Absence report"], ["leave", "Leave report"], ["waiver", "Waiver report"]] },
     ],
     VIEW_TITLES = {
       dashboard: "Dashboard",
@@ -3257,6 +3326,7 @@ function AttendanceApp() {
       tardy: "Tardiness report",
       absence: "Absence report",
       leave: "Leave report",
+      waiver: "Waiver report",
     },
     goView = (k) => {
       g(k);
@@ -3270,6 +3340,7 @@ function AttendanceApp() {
         tardy: ["M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M12 9v4l2.5 2.5M10 2.5h4"],
         absence: ["M10 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z", "M3.5 20c.6-3.4 3.3-5.5 6.5-5.5 1.3 0 2.5.3 3.5 1", "M16.5 15.5l4 4M20.5 15.5l-4 4"],
         leave: ["M4 6h16v14H4z", "M4 10.5h16M8.5 3.5V7M15.5 3.5V7", "M9.5 15.5h5"],
+        waiver: ["M12 3l7 3v5c0 4.4-3 8.3-7 9.5-4-1.2-7-5.1-7-9.5V6l7-3z", "M9 12l2 2 4-4"],
         guide: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 16.5v-5M12 8h.01"],
       }[k] || [];
       return React.createElement(
@@ -3297,7 +3368,7 @@ function AttendanceApp() {
       const key = (r.name || "\u2014") + "|" + (r.campaign || "");
       agents.has(key) ||
         agents.set(key, { name: r.name || "\u2014", campaign: r.campaign || "", days: 0, sched: 0, tardyMin: 0, tardyCnt: 0,
-          earlyMin: 0, earlyCnt: 0, absD: 0, absMin: 0, leaveD: 0, leaveMin: 0, last: "", types: new Map(), flag: !1 });
+          earlyMin: 0, earlyCnt: 0, absD: 0, absMin: 0, leaveD: 0, leaveMin: 0, last: "", types: new Map(), flag: !1, waivedMin: 0, waivedCnt: 0 });
       const a = agents.get(key),
         td = num(r.tardy),
         eo = num(r.earlyout),
@@ -3306,11 +3377,20 @@ function AttendanceApp() {
         dow = r.date ? new Date(r.date + "T00:00:00").getDay() : -1;
       a.days++; a.sched += d.sched; tot.days++; tot.sched += d.sched;
       if (td > 0) {
+        const wv = waiverOf(r);
         a.tardyMin += td; a.tardyCnt++; tot.tardyMin += td; tot.tardyCnt++;
+        wv && (a.waivedMin += td, a.waivedCnt++, (tot.waivedMin = (tot.waivedMin || 0) + td), (tot.waivedCnt = (tot.waivedCnt || 0) + 1));
         const mk = key + "|" + (r.date || "").slice(0, 7),
           m = agMonth.get(mk) || { min: 0, cnt: 0 };
-        m.min += td; m.cnt++; m.a = a; agMonth.set(mk, m);
-        if (kind === "tardy") { dow >= 0 && wd[dow]++; log.push({ r: r, d: d, v: td }); r.date > a.last && (a.last = r.date); }
+        wv || ((m.min += td), m.cnt++);
+        m.a = a; agMonth.set(mk, m);
+        if (kind === "tardy") { dow >= 0 && wd[dow]++; log.push({ r: r, d: d, v: td, wv: wv }); r.date > a.last && (a.last = r.date); }
+        if (kind === "waiver" && wv) {
+          log.push({ r: r, d: d, v: td, wv: wv, ty: wv.reason });
+          r.date > a.last && (a.last = r.date);
+          const rk = String(wv.reason || "Waived").split(" \u2014 ")[0];
+          types.set(rk, (types.get(rk) || 0) + 1);
+        }
       }
       if (eo > 0) { a.earlyMin += eo; a.earlyCnt++; tot.earlyMin += eo; tot.earlyCnt++; }
       if (ab > 0) {
@@ -3321,7 +3401,7 @@ function AttendanceApp() {
         a.leaveD++; a.leaveMin += lv; tot.leaveD++; tot.leaveMin += lv;
         const ty = String(r.leaveType || "").trim() || "Planned Leave";
         a.types.set(ty, (a.types.get(ty) || 0) + 1);
-        types.set(ty, (types.get(ty) || 0) + 1);
+        kind !== "waiver" && types.set(ty, (types.get(ty) || 0) + 1);
         if (kind === "leave") { log.push({ r: r, d: d, v: lv, ty: ty }); r.date > a.last && (a.last = r.date); }
       }
     });
@@ -3333,23 +3413,25 @@ function AttendanceApp() {
     const list = Array.from(agents.values()),
       flagged = list.filter((a) => a.flag).length,
       nearing = list.filter((a) => !a.flag && a.near).length,
-      withMetric = list.filter((a) => (kind === "tardy" ? a.tardyCnt > 0 : kind === "absence" ? a.absD > 0 : a.leaveD > 0));
+      withMetric = list.filter((a) => (kind === "tardy" ? a.tardyCnt > 0 : kind === "absence" ? a.absD > 0 : kind === "waiver" ? a.waivedCnt > 0 : a.leaveD > 0));
     const cfg = {
       tardy: {
-        intro: "Late arrivals and early outs on scheduled days. An agent goes on the watchlist at 6 late arrivals or 60 late minutes in a month, and is approaching the threshold at 4\u20135 lates or 45\u201359 minutes.",
+        intro: "Late arrivals and early outs on scheduled days. An agent goes on the watchlist at 6 late arrivals or 60 late minutes in a month, and is approaching the threshold at 4\u20135 lates or 45\u201359 minutes. Waived tardies are listed but don\u2019t count toward these limits.",
         kpis: [
-          ["Late arrivals", fmtN(tot.tardyCnt), tot.days ? fmtP(tot.tardyCnt / tot.days) + " of scheduled days" : "No scheduled days"],
-          ["Minutes late", fmtN(tot.tardyMin), tot.tardyCnt ? fmtD(tot.tardyMin / tot.tardyCnt) + " min per late arrival" : "\u2014"],
+          ["Late arrivals", fmtN(tot.tardyCnt), (tot.waivedCnt ? fmtN(tot.waivedCnt) + " waived \u00b7 " : "") + (tot.days ? fmtP(tot.tardyCnt / tot.days) + " of scheduled days" : "No scheduled days")],
+          ["Minutes late (counted)", fmtN(tot.tardyMin - (tot.waivedMin || 0)), tot.waivedMin ? fmtN(tot.tardyMin) + " actual \u00b7 " + fmtN(tot.waivedMin) + " waived" : tot.tardyCnt ? fmtD(tot.tardyMin / tot.tardyCnt) + " min per late arrival" : "\u2014"],
           ["On watchlist", fmtN(flagged), "6+ lates or 60+ min in a month", "over"],
           ["Approaching threshold", fmtN(nearing), "4\u20135 lates or 45\u201359 min in a month", "near"],
         ],
         cols: [
-          ["name", "Agent", "l"], ["campaign", "Campaign", "l"], ["tardyCnt", "Late days"], ["tardyMin", "Minutes late"],
-          ["avg", "Avg per late"], ["earlyCnt", "Early outs"], ["earlyMin", "Early-out min"], ["flag", "Status"],
+          ["name", "Agent", "l"], ["campaign", "Campaign", "l"], ["tardyCnt", "Late days"], ["tardyMin", "Late min"],
+          ["waivedMin", "Waived"], ["counted", "Counted"], ["earlyCnt", "Early outs"], ["earlyMin", "Early-out min"], ["flag", "Status"],
         ],
-        val: (a, k) => (k === "avg" ? (a.tardyCnt ? a.tardyMin / a.tardyCnt : 0) : k === "flag" ? (a.flag ? 2 : a.near ? 1 : 0) : a[k]),
+        val: (a, k) => (k === "avg" ? (a.tardyCnt ? a.tardyMin / a.tardyCnt : 0) : k === "counted" ? a.tardyMin - a.waivedMin : k === "flag" ? (a.flag ? 2 : a.near ? 1 : 0) : a[k]),
         cell: (a, k) =>
           k === "avg" ? fmtD(a.tardyCnt ? a.tardyMin / a.tardyCnt : null)
+          : k === "counted" ? fmtN(a.tardyMin - a.waivedMin)
+          : k === "waivedMin" ? (a.waivedMin ? React.createElement("span", { className: "wv-num" }, fmtN(a.waivedMin)) : "\u2014")
           : k === "flag"
             ? a.flag
               ? React.createElement("span", { className: "chip chip-over" }, "Watchlist")
@@ -3406,6 +3488,26 @@ function AttendanceApp() {
         logTitle: "Leave log",
         logVal: "Minutes",
       },
+      waiver: {
+        intro: "Tardies that were waived, e.g. for inclement weather. The actual minutes are kept on record, but they\u2019re credited back and don\u2019t count toward the watchlist.",
+        kpis: [
+          ["Waived tardies", fmtN(tot.waivedCnt || 0), "of " + fmtN(tot.tardyCnt) + " late arrivals"],
+          ["Minutes waived", fmtN(tot.waivedMin || 0), "Credited back to attendance"],
+          ["Share of late minutes", fmtP(tot.tardyMin ? (tot.waivedMin || 0) / tot.tardyMin : null), "Waived \u00f7 all tardy minutes"],
+          ["Agents with waivers", fmtN(withMetric.length), "of " + fmtN(list.length) + " scheduled agents"],
+        ],
+        cols: [
+          ["name", "Agent", "l"], ["campaign", "Campaign", "l"], ["waivedCnt", "Waived tardies"], ["waivedMin", "Minutes waived"],
+          ["tardyCnt", "All late days"], ["tardyMin", "All late min"], ["share", "% waived"], ["last", "Last waiver"],
+        ],
+        val: (a, k) => (k === "share" ? (a.tardyMin ? a.waivedMin / a.tardyMin : 0) : a[k]),
+        cell: (a, k) => (k === "share" ? fmtP(a.tardyMin ? a.waivedMin / a.tardyMin : null) : k === "last" ? fmtMDY(a.last) || "\u2014" : fmtN(a[k])),
+        defSort: "waivedMin",
+        empty: "No waived tardies for these filters. Waive a tardy from the shield icon in the Tracker.",
+        side: "Waivers by reason",
+        logTitle: "Waiver log",
+        logVal: "Minutes waived",
+      },
     }[kind];
     const srt = rpSort[kind] || { k: cfg.defSort, d: "desc" },
       rows = withMetric.slice().sort((a, b) => {
@@ -3420,13 +3522,13 @@ function AttendanceApp() {
           const cur = p[kind] || { k: cfg.defSort, d: "desc" };
           return { ...p, [kind]: cur.k === k ? { k: k, d: cur.d === "asc" ? "desc" : "asc" } : { k: k, d: k === "name" || k === "campaign" ? "asc" : "desc" } };
         });
-    const sideRows = kind === "leave"
+    const sideRows = kind === "leave" || kind === "waiver"
       ? Array.from(types.entries()).sort((a, b) => b[1] - a[1])
       : [1, 2, 3, 4, 5, 6, 0].map((i) => [DAYS[i], wd[i]]);
     const sideMax = Math.max(1, ...sideRows.map((r) => r[1]));
     log.sort((a, b) => (b.r.date || "").localeCompare(a.r.date || "") || (a.r.name || "").localeCompare(b.r.name || ""));
     rpRef.current = { kind: kind, cfg: cfg, rows: rows, log: log };
-    const accent = kind === "tardy" ? "#C08A2D" : kind === "absence" ? "#B23A3A" : "#2C7BB6";
+    const accent = kind === "tardy" ? "#C08A2D" : kind === "absence" ? "#B23A3A" : kind === "waiver" ? "#2563EB" : "#2C7BB6";
     return React.createElement(
       "div",
       { className: "rp", style: { "--rp-accent": accent } },
@@ -3511,7 +3613,7 @@ function AttendanceApp() {
         ),
       React.createElement(
         "div",
-        { className: "rp-grid" },
+        { className: "rp-grid" + (kind === "waiver" ? " rp-stack" : "") },
       React.createElement(
         "section",
         { className: "panel" },
@@ -3538,12 +3640,14 @@ function AttendanceApp() {
                       "tr",
                       null,
                       React.createElement("th", { className: "l" }, "Date"),
-                      React.createElement("th", { className: "l" }, "Day"),
                       React.createElement("th", { className: "l" }, "Agent"),
                       React.createElement("th", { className: "l" }, "Campaign"),
-                      React.createElement("th", { className: "l" }, "Shift"),
+                      kind !== "waiver" && React.createElement("th", { className: "l" }, "Shift"),
                       kind === "leave" && React.createElement("th", { className: "l" }, "Leave type"),
                       React.createElement("th", null, cfg.logVal),
+                      kind === "waiver" && React.createElement("th", { className: "l" }, "Reason"),
+                      kind === "waiver" && React.createElement("th", { className: "l" }, "Waived on"),
+                      kind === "tardy" && React.createElement("th", { className: "l" }, "Waiver"),
                     ),
                   ),
                   React.createElement(
@@ -3553,8 +3657,12 @@ function AttendanceApp() {
                       React.createElement(
                         "tr",
                         { key: e.r.id },
-                        React.createElement("td", { className: "l mono" }, fmtMDY(e.r.date)),
-                        React.createElement("td", { className: "l" }, e.d.day),
+                        React.createElement(
+                          "td",
+                          { className: "l mono" },
+                          React.createElement("span", { className: "log-wd" }, e.d.day),
+                          fmtMDY(e.r.date),
+                        ),
                         React.createElement(
                           "td",
                           { className: "l" },
@@ -3565,9 +3673,17 @@ function AttendanceApp() {
                           ),
                         ),
                         React.createElement("td", { className: "l" }, e.r.campaign || "\u2014"),
-                        React.createElement("td", { className: "l mono muted" }, e.r.shift || "\u2014"),
+                        kind !== "waiver" && React.createElement("td", { className: "l mono muted" }, e.r.shift || "\u2014"),
                         kind === "leave" && React.createElement("td", { className: "l" }, e.ty),
-                        React.createElement("td", { className: "mono" }, fmtN(e.v)),
+                        React.createElement("td", { className: "mono" + (e.wv && kind === "tardy" ? " td-wv" : "") }, fmtN(e.v)),
+                        kind === "waiver" && React.createElement("td", { className: "l" }, e.wv.reason),
+                        kind === "waiver" && React.createElement("td", { className: "l mono muted" }, fmtMDY(e.r.waivedAt) || "\u2014"),
+                        kind === "tardy" &&
+                          React.createElement(
+                            "td",
+                            { className: "l" },
+                            e.wv ? [React.createElement("span", { key: "c", className: "chip chip-wv" }, "Waived"), React.createElement("span", { key: "r", className: "wv-reason" }, e.wv.reason)] : "",
+                          ),
                       ),
                     ),
                   ),
@@ -3968,6 +4084,54 @@ function AttendanceApp() {
         .trk-agent { color: var(--text-heading); margin-right: 8px; }
         .trk-agent-camp { color: var(--text-muted); margin-right: 14px; font-size: 12.5px; }
         .trk-agent-camp::before { content: "·"; margin-right: 8px; }
+        /* ---------- Waivers ---------- */
+        .tcell { display: inline-flex; align-items: center; gap: 2px; width: 100%; }
+        .tcell .cell { flex: 1; min-width: 0; }
+        .wv-spacer { flex: 0 0 22px; }
+        .log-wd { display: inline-block; width: 32px; color: var(--text-muted); font-weight: 500; }
+        .wv-btn { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-faint); cursor: pointer; opacity: 0; transition: opacity .12s; font-family: inherit; }
+        tr.trow:hover .wv-btn, .wv-btn:focus-visible, .wv-btn.on { opacity: 1; }
+        .wv-btn:hover { background: var(--bg-ghost-hover); color: var(--text-heading); }
+        .wv-btn.on { color: #2563EB; }
+        html[data-theme="dark"] .wv-btn.on { color: #8FB4F5; }
+        .wv-btn-m { opacity: 1; width: auto; height: 24px; padding: 0 6px; margin-top: 2px; font-size: 11.5px; font-weight: 600; justify-content: flex-start; color: var(--text-muted); }
+        .cell.cell-waived, .mnum input.cell-waived { color: var(--text-muted) !important; text-decoration: line-through; text-decoration-color: color-mix(in srgb, #2563EB 60%, transparent); font-weight: 600; }
+        .wv-pop { position: fixed; z-index: 80; width: 290px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 40px rgba(15,23,42,.18); padding: 14px; color: var(--text); }
+        .wv-pop-h { font-size: 13px; font-weight: 600; color: var(--text-heading); }
+        .wv-pop-min { font-size: 12px; color: var(--text-muted); margin: 2px 0 10px; }
+        .wv-pop p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text-body); }
+        .wv-pop-act { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
+        .wv-f { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; flex: 1; min-width: 0; }
+        .wv-f span { font-size: 12px; font-weight: 600; color: var(--text-sub); }
+        .wv-f input, .wv-f select { width: 100%; }
+        .wv-f input { height: 34px; padding: 0 10px; border: 1px solid var(--border-input); border-radius: 8px; background: var(--bg-panel); font-size: 13px; color: var(--text); font-family: inherit; }
+        .wv-danger { color: #B23A3A !important; }
+        html[data-theme="dark"] .wv-danger { color: #F2A8A8 !important; }
+        .wv-form { border: 1px solid var(--border); border-radius: 10px; padding: 6px 14px 14px; background: var(--bg-panel-alt); }
+        .wv-row { display: flex; gap: 12px; }
+        .wv-add { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+        .wv-prev { font-size: 12.5px; color: var(--text-sub); }
+        .wv-list-h { display: flex; align-items: center; gap: 8px; margin: 20px 0 8px; font-size: 13px; font-weight: 700; color: var(--text-heading); }
+        .wv-list-h span { font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 99px; background: var(--bg-tabs); color: var(--text-sub); }
+        .wv-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        .wv-item { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+        .wv-item + .wv-item { border-top: 1px solid var(--border); }
+        .wv-item-t { font-size: 13px; font-weight: 600; color: var(--text-heading); display: flex; gap: 10px; flex-wrap: wrap; }
+        .wv-item-t span { font-weight: 500; color: var(--text-body); }
+        .wv-item-s { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+        .wv-empty { font-size: 13px; color: var(--text-muted); padding: 14px; border: 1px dashed var(--border-ghost); border-radius: 10px; text-align: center; }
+        .dgrp-sum .wv { color: #2563EB; font-weight: 600; }
+        html[data-theme="dark"] .dgrp-sum .wv { color: #8FB4F5; }
+        .chip-wv { background: color-mix(in srgb, #2563EB 12%, transparent); color: #1D4ED8; }
+        html[data-theme="dark"] .chip-wv { color: #8FB4F5; }
+        .wv-reason { font-size: 12px; color: var(--text-muted); margin-left: 6px; }
+        .dk-note { color: #2563EB; font-weight: 600; }
+        html[data-theme="dark"] .dk-note { color: #8FB4F5; }
+        .w-mark { display: inline-block; margin-left: 4px; font-size: 10px; font-weight: 700; color: #2563EB; vertical-align: 1px; }
+        @media (max-width: 560px) { .wv-row { flex-direction: column; gap: 0; } }
+        td.td-wv { color: var(--text-muted) !important; text-decoration: line-through; }
+        .wv-num { color: #2563EB; font-weight: 600; }
+        html[data-theme="dark"] .wv-num { color: #8FB4F5; }
         /* ---------- Reports ---------- */
         .rp-intro { margin: 0 0 16px; font-size: 13.5px; line-height: 1.55; color: var(--text-sub); max-width: 72ch; }
         .rp-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
@@ -3984,13 +4148,13 @@ function AttendanceApp() {
         .rt-wrap { overflow: auto; max-height: 520px; }
         table.rt { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
         table.rt th { position: sticky; top: 0; z-index: 1; background: var(--bg-panel-alt); border-bottom: 1px solid var(--border); padding: 0; text-align: right; font-weight: 600; font-size: 12px; color: var(--text-muted-2); white-space: nowrap; }
-        table.rt th:not(:has(button)) { padding: 9px 14px; }
+        table.rt th:not(:has(button)) { padding: 9px 12px; }
         table.rt th.l, table.rt td.l { text-align: left; }
-        table.rt td { padding: 9px 14px; border-bottom: 1px solid var(--border-row); text-align: right; color: var(--text); white-space: nowrap; }
+        table.rt td { padding: 9px 12px; border-bottom: 1px solid var(--border-row); text-align: right; color: var(--text); white-space: nowrap; }
         table.rt tbody tr:last-child td { border-bottom: 0; }
         table.rt tbody tr:hover td { background: var(--bg-panel-alt); }
         td.muted { color: var(--text-sub) !important; }
-        .rt-sort { width: 100%; display: inline-flex; align-items: center; justify-content: inherit; gap: 5px; border: 0; background: none; padding: 9px 14px; font: inherit; color: inherit; cursor: pointer; }
+        .rt-sort { width: 100%; display: inline-flex; align-items: center; justify-content: inherit; gap: 5px; border: 0; background: none; padding: 9px 12px; font: inherit; color: inherit; cursor: pointer; }
         th.l .rt-sort { justify-content: flex-start; }
         th:not(.l) .rt-sort { justify-content: flex-end; }
         .rt-sort:hover, .rt-sort.on { color: var(--text-heading); }
@@ -4020,6 +4184,9 @@ function AttendanceApp() {
         .bar-track { height: 8px; border-radius: 99px; background: var(--donut-track); overflow: hidden; }
         .bar-fill { display: block; height: 100%; border-radius: 99px; background: var(--rp-accent); transition: width .3s ease; }
         .bar-v { text-align: right; color: var(--text-strong2); font-weight: 600; }
+        .rp-grid.rp-stack { grid-template-columns: 1fr; }
+        .rp-grid.rp-stack > section:last-child { order: -1; }
+        .rp-grid.rp-stack .bar-row { grid-template-columns: minmax(160px, 260px) 1fr 40px; }
         .rp-empty { padding: 36px 18px; text-align: center; color: var(--text-muted); font-size: 13px; }
         .rp-more { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--text-muted); }
         /* ---------- Responsive ---------- */
@@ -4038,6 +4205,51 @@ function AttendanceApp() {
         @media (prefers-reduced-motion: reduce) { .sb, .bar-fill { transition: none !important; } .today-dot { animation: none !important; } }
       `,
     ),
+    waivePop &&
+      (() => {
+        const t = s.find((r) => r.id === waivePop.id);
+        if (!t) return null;
+        const w = waiverOf(t),
+          st = waivePop.up ? { left: waivePop.x, bottom: window.innerHeight - waivePop.top + 6 } : { left: waivePop.x, top: waivePop.y };
+        return React.createElement(
+          "div",
+          { className: "wv-pop", style: st, role: "dialog", "aria-label": "Waive tardy" },
+          React.createElement("div", { className: "wv-pop-h" }, (t.name || "Agent") + " \u00b7 " + fmtMDY(t.date)),
+          React.createElement("div", { className: "wv-pop-min" }, num(t.tardy) + " min late"),
+          w
+              ? React.createElement(
+                  React.Fragment,
+                  null,
+                  React.createElement("p", null, "Waived: ", React.createElement("b", null, w.reason), t.waivedAt ? " \u00b7 on " + fmtMDY(t.waivedAt) : ""),
+                  h && React.createElement("button", { type: "button", className: "btn ghost btn-sm wv-danger", onClick: () => unwaiveRow(t.id) }, "Remove waiver"),
+                )
+              : React.createElement(
+                  React.Fragment,
+                  null,
+                  React.createElement(
+                    "label",
+                    { className: "wv-f" },
+                    React.createElement("span", null, "Reason"),
+                    React.createElement(
+                      "select",
+                      { className: "fsel", value: popReason.reason, onChange: (e) => setPopReason({ ...popReason, reason: e.target.value }) },
+                      WAIVE_REASONS.map((r) => React.createElement("option", { key: r }, r)),
+                    ),
+                  ),
+                  React.createElement(
+                    "label",
+                    { className: "wv-f" },
+                    React.createElement("span", null, popReason.reason === "Other" ? "Describe the reason" : "Note (optional)"),
+                    React.createElement("input", { value: popReason.note, onChange: (e) => setPopReason({ ...popReason, note: e.target.value }), placeholder: popReason.reason === "Other" ? "e.g. Road closure" : "" }),
+                  ),
+                  React.createElement(
+                    "div",
+                    { className: "wv-pop-act" },
+                    React.createElement("button", { type: "button", className: "btn btn-sm", disabled: !h, onClick: () => waiveRow(t.id, reasonText(popReason.reason, popReason.note)) }, "Waive tardy"),
+                  ),
+                ),
+        );
+      })(),
     syncOpen &&
       React.createElement(
         "div",
@@ -4377,7 +4589,7 @@ function AttendanceApp() {
       {
         className: "app-content",
       },
-      ["tardy", "absence", "leave"].includes(u) && renderReport(),
+      ["tardy", "absence", "leave", "waiver"].includes(u) && renderReport(),
       u === "tracker" &&
         React.createElement(
           React.Fragment,
@@ -5628,7 +5840,11 @@ function AttendanceApp() {
                           React.createElement(
                             "td",
                             { className: "mono" },
-                            num(e.tardy) > 0 ? mins(num(e.tardy)) : "",
+                            num(e.tardy) > 0
+                              ? waiverOf(e)
+                                ? [React.createElement("s", { key: "v", style: { color: "var(--text-muted)" }, title: "Waived: " + waiverOf(e).reason }, mins(num(e.tardy))), React.createElement("span", { key: "w", className: "w-mark", title: "Waived: " + waiverOf(e).reason }, "W")]
+                                : mins(num(e.tardy))
+                              : "",
                           ),
                           React.createElement(
                             "td",
@@ -6365,6 +6581,10 @@ root.render(React.createElement(AttendanceApp, null));
     </div>
 
     <div class="gd-sec">
+      <h3>6 · Waived tardiness</h3>
+      <p>A tardy can be <b>waived</b> (e.g. inclement weather) using the shield icon next to the Tardy cell in the Tracker. Only tardiness is waived; early outs still count.</p>
+      <div class="gd-f">Counted tardy = Tardy minutes, or 0 if waived</div>
+      <p>The actual minutes stay visible in the Tracker and reports, and every waiver is listed in the <b>Waiver report</b>. Waived minutes are credited back in Minutes worked, Attendance and Shrinkage, and don&rsquo;t count toward the watchlist or approaching threshold.</p>
       <h3>Worked example</h3>
       <div class="gd-ex">
         Shift 9:00 AM&ndash;6:00 PM &rarr; <b>480</b> scheduled.<br>
