@@ -194,18 +194,68 @@ function buildProfiles(u) {
 }
 const DEFAULT_GS_URL =
     "https://script.google.com/macros/s/AKfycbw92HPvI9lODOkr2NTQRyrIIArxtXpLxJ8A5JdcaVZRNppd6t_uxLMEdBIt7gQ2yPz3zg/exec",
-  APPS_SCRIPT = `/** Attendance Tracker sync \u2014 paste into Extensions > Apps Script,
- *  Deploy > New deployment > Web app. Execute as: Me. Access: Anyone.
- *  Then paste the Web app URL into the tracker. */
+  APPS_SCRIPT = `/** Attendance Tracker sync v2 \u2014 paste into Extensions > Apps Script (replace everything),
+ *  then Deploy > Manage deployments > Edit (pencil) > Version: New version > Deploy.
+ *  (Editing the existing deployment keeps the same Web app URL.)
+ *  v2 merges each save row-by-row using timestamps, so one device can no longer
+ *  overwrite or wipe rows that another device saved. */
 function doPost(e) {
   var lock = LockService.getScriptLock();
   try { lock.waitLock(30000); } catch (err) { return ContentService.createTextOutput("busy"); }
   try {
     var data = JSON.parse(e.postData.contents);
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    writeTab(ss, "Attendance", data.rows || []);
-    writeState(ss, "_state", data.state || []);
+    var stateSh = ss.getSheetByName("_state") || ss.insertSheet("_state");
+    var map = {}, order = [];
+    var cur = stateSh.getDataRange().getValues();
+    for (var i = 1; i < cur.length; i++) {
+      if (!cur[i][0]) continue;
+      try {
+        var o = JSON.parse(cur[i][0]);
+        if (!o || !o.id) continue;
+        if (!map[o.id]) order.push(o.id);
+        map[o.id] = { json: String(cur[i][0]), row: cur[i][1] ? String(cur[i][1]) : "", u: +o.updatedAt || 0, del: !!o._deleted };
+      } catch (err) {}
+    }
+    (data.state || []).forEach(function (s) {
+      try {
+        var o = JSON.parse(s.json);
+        if (!o || !o.id) return;
+        var u = +o.updatedAt || 0, ex = map[o.id];
+        if (ex && ex.u > u) return; // server already has a newer version (or a newer delete)
+        if (!ex) order.push(o.id);
+        map[o.id] = { json: s.json, row: s.row || "", u: u, del: false };
+      } catch (err) {}
+    });
+    (data.deleted || []).forEach(function (d) {
+      if (!d || !d.id) return;
+      var u = +d.updatedAt || 0, ex = map[d.id];
+      if (ex && ex.u > u) return; // row was edited after the delete
+      if (!ex) order.push(d.id);
+      map[d.id] = { json: JSON.stringify({ id: d.id, _deleted: true, updatedAt: u }), row: "", u: u, del: true };
+    });
+    var cutoff = Date.now() - 180 * 864e5, stateVals = [["json", "row"]], rows = [];
+    order.forEach(function (id) {
+      var m = map[id];
+      if (m.del && m.u && m.u < cutoff) return; // forget very old deletions
+      stateVals.push([m.json, m.row]);
+      if (m.del) return;
+      var r = null;
+      try { r = m.row ? JSON.parse(m.row) : null; } catch (err) {}
+      if (!r) { var o = JSON.parse(m.json); r = { Date: o.date || "", Shift: o.shift || "", Campaign: o.campaign || "", Names: o.name || "", Absent: o.absent || "", Tardy: o.tardy || "", "Early Out": o.earlyout || "", Leave: o.leave || "", OT: o.ot || "" }; }
+      rows.push(r);
+    });
+    rows.sort(function (a, b) {
+      var x = String(a.Date || "9999-99-99"), y = String(b.Date || "9999-99-99");
+      return x !== y ? (x < y ? -1 : 1) : String(a.Names || "").localeCompare(String(b.Names || ""));
+    });
+    stateSh.clearContents();
+    stateSh.getRange(1, 1, stateVals.length, 2).setValues(stateVals);
+    try { stateSh.hideSheet(); } catch (err) {}
+    writeTab(ss, "Attendance", rows);
     return ContentService.createTextOutput("ok");
+  } catch (err) {
+    return ContentService.createTextOutput("error: " + err);
   } finally {
     lock.releaseLock();
   }
@@ -219,13 +269,6 @@ function writeTab(ss, name, rows) {
   var values = [order].concat(rows.map(function (r) { return order.map(function (k) { return r[k] === undefined ? "" : r[k]; }); }));
   sh.getRange(1, 1, values.length, order.length).setValues(values);
   sh.setFrozenRows(1);
-}
-function writeState(ss, name, rows) {
-  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
-  sh.clearContents();
-  var values = [["json"]].concat(rows.map(function (r) { return [r.json]; }));
-  sh.getRange(1, 1, values.length, 1).setValues(values);
-  try { sh.hideSheet(); } catch (err) {}
 }
 function doGet(e) {
   var cb = (e.parameter && e.parameter.callback) || "callback";
@@ -244,6 +287,30 @@ function loadRows() {
   } catch (u) {
     return [];
   }
+}
+const TKEY = "attendance:tombs", DIRTYKEY = "attendance:dirty";
+function loadTombs() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TKEY) || "{}") || {},
+      cut = Date.now() - 90 * 864e5;
+    Object.keys(t).forEach((k) => { if (!(t[k] > cut)) delete t[k]; });
+    return t;
+  } catch (e) {
+    return {};
+  }
+}
+function saveTombs(t) {
+  try { localStorage.setItem(TKEY, JSON.stringify(t)); } catch (e) {}
+}
+function setDirtyFlag(v) {
+  try { v ? localStorage.setItem(DIRTYKEY, "1") : localStorage.removeItem(DIRTYKEY); } catch (e) {}
+}
+function sameRow(a, b) {
+  if (a === b) return !0;
+  if (!a || !b) return !1;
+  const x = Object.assign({}, a), y = Object.assign({}, b);
+  delete x.updatedAt; delete y.updatedAt;
+  return JSON.stringify(x) === JSON.stringify(y);
 }
 function saveRows(u) {
   try {
@@ -381,6 +448,10 @@ function AttendanceApp() {
     Nt = useRef(),
     zt = useRef(!1),
     ut = useRef([]),
+    tombRef = useRef(loadTombs()),
+    pushRef = useRef(),
+    payloadRef = useRef(),
+    retryRef = useRef(),
     [L, Wt] = useState(""),
     [Se, Ae] = useState(""),
     [Et, z] = useState("idle"),
@@ -704,7 +775,9 @@ function AttendanceApp() {
     } catch (e) {}
   }, [dk]);
   (useEffect(() => {
-    m(loadRows());
+    const lr = loadRows();
+    ((ut.current = lr), m(lr));
+    try { D.current = localStorage.getItem(DIRTYKEY) === "1"; } catch (e) {}
     let t = DEFAULT_GS_URL;
     try {
       const st = localStorage.getItem("attendance:gsurl");
@@ -729,6 +802,11 @@ function AttendanceApp() {
         clearTimeout(Nt.current);
         try {
           localStorage.setItem(GKEY, JSON.stringify(ut.current));
+        } catch (n) {}
+        try {
+          const pr = payloadRef.current;
+          D.current && pr &&
+            navigator.sendBeacon(pr.url, new Blob([pr.body()], { type: "text/plain;charset=utf-8" }));
         } catch (n) {}
       };
       return (
@@ -757,12 +835,33 @@ function AttendanceApp() {
         (Xt.current = setTimeout(() => S(null), n.fn ? 6e3 : 2400)));
     },
     F = (t) => {
-      h &&
-        ((D.current = !0),
+      if (!h) return;
+      const prev = ut.current;
+      typeof t == "function" && (t = t(prev));
+      const pm = new Map(prev.map((o) => [o.id, o])),
+        now = Date.now(),
+        tombs = tombRef.current;
+      let tc = !1;
+      t = t.map((o) => {
+        const p = pm.get(o.id);
+        if (p === o) return o;
+        if (p && sameRow(p, o)) return p;
+        return { ...o, updatedAt: now };
+      });
+      const ids = new Set(t.map((o) => o.id));
+      prev.forEach((o) => {
+        ids.has(o.id) || ((tombs[o.id] = now), (tc = !0));
+      });
+      t.forEach((o) => {
+        tombs[o.id] && (delete tombs[o.id], (tc = !0));
+      });
+      tc && saveTombs(tombs);
+      ((D.current = !0),
+        setDirtyFlag(!0),
         (ut.current = t),
         m(t),
         clearTimeout(Nt.current),
-        (Nt.current = setTimeout(() => saveRows(t), 400)));
+        (Nt.current = setTimeout(() => saveRows(ut.current), 400)));
     },
     P = useMemo(
       () =>
@@ -996,17 +1095,13 @@ function AttendanceApp() {
       askConfirm(
         "Delete this row?",
         () => {
-          const n = s.find((e) => e.id === t);
-          (F(s.filter((e) => e.id !== t)),
+          const n = ut.current.find((e) => e.id === t);
+          (F((c) => c.filter((e) => e.id !== t)),
             n &&
               b({
                 msg: "Row deleted",
                 actionLabel: "Undo",
-                fn: () =>
-                  m((e) => {
-                    const o = [...e, n];
-                    return (saveRows(o), o);
-                  }),
+                fn: () => F((e) => (e.some((x) => x.id === n.id) ? e : [...e, n])),
               }));
         },
         { label: "Delete" },
@@ -1029,16 +1124,16 @@ function AttendanceApp() {
         "Delete " + k.size + " selected row(s)? You can undo right after.",
         () => {
           const t = k,
-            n = s.filter((e) => t.has(e.id));
-          (F(s.filter((e) => !t.has(e.id))),
+            n = ut.current.filter((e) => t.has(e.id));
+          (F((c) => c.filter((e) => !t.has(e.id))),
             Y(new Set()),
             b({
               msg: n.length + " row" + (n.length === 1 ? "" : "s") + " deleted",
               actionLabel: "Undo",
               fn: () =>
-                m((e) => {
-                  const o = [...e, ...n];
-                  return (saveRows(o), o);
+                F((e) => {
+                  const have = new Set(e.map((x) => x.id));
+                  return [...e, ...n.filter((x) => !have.has(x.id))];
                 }),
             }));
         },
@@ -1516,23 +1611,41 @@ function AttendanceApp() {
             Minutes: o.minutes == null ? "" : o.minutes,
           };
         }),
-      state: s.map((e) => ({ json: JSON.stringify(e) })),
+      state: s.map((e) => {
+        const o = lt(e);
+        return {
+          json: JSON.stringify(e),
+          row: JSON.stringify({
+            Year: o.year, Month: o.month, Date: e.date || "", Day: o.day, Shift: e.shift || "",
+            Campaign: e.campaign || "", Names: e.name || "", Scheduled: o.sched == null ? "" : o.sched,
+            Absent: e.absent || "", Tardy: e.tardy || "",
+            "Tardy Waived": waiverOf(e) ? "Yes" : "", "Waive Reason": waiverOf(e) ? waiverOf(e).reason : "",
+            "Early Out": e.earlyout || "", Leave: e.leave || "", OT: e.ot || "",
+            Minutes: o.minutes == null ? "" : o.minutes,
+          }),
+        };
+      }),
+      deleted: Object.keys(tombRef.current).map((id) => ({ id, updatedAt: tombRef.current[id] })),
     }),
     Ue = async () => {
-      if (L) {
-        z("syncing");
-        try {
-          (await fetch(L, {
+      if (!L) return;
+      clearTimeout(retryRef.current);
+      z("syncing");
+      D.current = !1;
+      try {
+        const r = await fetch(L, {
             method: "POST",
-            mode: "no-cors",
             headers: { "Content-Type": "text/plain;charset=utf-8" },
             body: JSON.stringify(Ke()),
           }),
-            z("ok"),
-            Rt(new Date()));
-        } catch (t) {
-          z("error");
-        }
+          txt = (await r.text()).trim();
+        if (txt !== "ok") throw new Error(txt || "HTTP " + r.status);
+        D.current ? z("pending") : (setDirtyFlag(!1), z("ok"), Rt(new Date()));
+      } catch (t) {
+        (console.error("Sync failed:", t),
+          (D.current = !0),
+          z("error"),
+          (retryRef.current = setTimeout(() => pushRef.current && pushRef.current(), 15e3)));
       }
     },
     Ve = (t) => {
@@ -1546,18 +1659,36 @@ function AttendanceApp() {
         o = document.createElement("script");
       ((window[e] = (a) => {
         try {
-          const pAll = (Array.isArray(a) ? a : (a && a.rows) || []).map((f) => JSON.parse(f)),
-            p = pAll.filter((f) => f && f.kind !== "waiver"),
-            r = new Map(s.map((f) => [f.id, f]));
-          p.forEach((f) => r.set(f.id, f));
-          const l = Array.from(r.values());
+          const pAll = (Array.isArray(a) ? a : (a && a.rows) || []).map((f) => {
+              try { return JSON.parse(f); } catch (x) { return null; }
+            }),
+            tombs = tombRef.current,
+            r = new Map(ut.current.map((f) => [f.id, f]));
+          let changed = !1, tc = !1, cnt = 0;
+          pAll.forEach((f) => {
+            if (!f || !f.id || f.kind === "waiver") return;
+            const ru = +f.updatedAt || 0, loc = r.get(f.id), lu = loc ? +loc.updatedAt || 0 : 0;
+            if (f._deleted) {
+              (loc && lu <= ru && (r.delete(f.id), (changed = !0)),
+                (tombs[f.id] || 0) < ru && ((tombs[f.id] = ru), (tc = !0)));
+              return;
+            }
+            cnt++;
+            if (tombs[f.id] && tombs[f.id] >= ru) return; // deleted here, delete not saved yet
+            if (loc && (lu > ru || sameRow(loc, f))) return; // local copy is newer / identical
+            (r.set(f.id, f), (changed = !0));
+          });
+          tc && saveTombs(tombs);
+          if (changed) {
+            const l = Array.from(r.values());
+            ((ut.current = l), m(l), saveRows(l));
+          }
           (n || (D.current = !0),
-            m(l),
-            (ut.current = l),
-            saveRows(l),
-            z("ok"),
+            D.current
+              ? (z("pending"), clearTimeout(Dt.current), (Dt.current = setTimeout(() => pushRef.current && pushRef.current(), 1e3)))
+              : z("ok"),
             Rt(new Date()),
-            n || b("Loaded " + p.length + " row(s) from Google Sheet"));
+            n || b("Loaded " + cnt + " row(s) from Google Sheet"));
         } catch (d) {
           (z("error"), n || b("Could not read sheet data"));
         }
@@ -1602,6 +1733,8 @@ function AttendanceApp() {
   useEffect(() => {
     pullRef.current = Ve;
     statusRef.current = Et;
+    pushRef.current = Ue;
+    payloadRef.current = L ? { url: L, body: () => JSON.stringify(Ke()) } : null;
   });
   useEffect(() => {
     if (!L) return;
@@ -2375,12 +2508,12 @@ function AttendanceApp() {
       setWaivePop({ id: t.id, x: Math.min(window.innerWidth - 300, Math.max(8, rc.left - 120)), y: rc.bottom + 6, up: rc.bottom + 260 > window.innerHeight, top: rc.top });
     },
     waiveRow = (id, reason) => {
-      F(s.map((o) => (o.id === id ? { ...o, tardyWaived: "1", waiveReason: reason, waivedAt: todayYMD() } : o)));
+      F((c) => c.map((o) => (o.id === id ? { ...o, tardyWaived: "1", waiveReason: reason, waivedAt: todayYMD() } : o)));
       setWaivePop(null);
       b("Tardy waived \u2014 still shown, no longer counted");
     },
     unwaiveRow = (id) => {
-      F(s.map((o) => (o.id === id ? { ...o, tardyWaived: "", waiveReason: "", waivedAt: "" } : o)));
+      F((c) => c.map((o) => (o.id === id ? { ...o, tardyWaived: "", waiveReason: "", waivedAt: "" } : o)));
       setWaivePop(null);
       b("Waiver removed");
     },
