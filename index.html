@@ -1890,7 +1890,7 @@ function AttendanceApp() {
     tardyOver = (n) => n.tardyMin >= 60 || n.tardyCount >= 6,
     tardyNear = (n) =>
       !tardyOver(n) &&
-      ((n.tardyCount >= 4 && n.tardyCount <= 5) || (n.tardyMin >= 45 && n.tardyMin <= 59)),
+      ((n.tardyCount >= 3 && n.tardyCount <= 5) || (n.tardyMin >= 30 && n.tardyMin <= 59)),
     xt = useMemo(
       () =>
         tardyAM
