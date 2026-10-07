@@ -149,6 +149,18 @@ function pctRound(t) {
   t < 0.9 && r >= 90 && (r = 89.99);
   return r;
 }
+function hasLogged(u) {
+  return ["absent", "tardy", "earlyout", "leave", "ot"].some((k) => {
+    const v = String(u[k] == null ? "" : u[k]).trim();
+    return v !== "" && v !== "0";
+  });
+}
+// Past days always count. Today counts only once something has been logged for that agent.
+function countsYet(u) {
+  if (!u.date) return !0;
+  const t = todayYMD();
+  return u.date < t || (u.date === t && hasLogged(u));
+}
 function tardyCounted(u) {
   return waiverOf(u) ? 0 : num(u.tardy);
 }
@@ -1385,7 +1397,7 @@ function AttendanceApp() {
           : s.filter((t) => {
               const n = monthOf(t);
               return (
-                (!t.date || t.date < todayYMD()) &&
+                countsYet(t) &&
                 (I === "all" || n.month === I) &&
                 (nt === "all" || String(n.year) === String(nt)) &&
                 (ot === "all" || (t.campaign || "") === ot) &&
@@ -1410,7 +1422,7 @@ function AttendanceApp() {
     }),
     H = (t, n) => {
       const e = lt(n);
-      if (e.sched == null || (n.date && n.date >= todayYMD())) return;
+      if (e.sched == null || !countsYet(n)) return;
       ((t.sched += e.sched),
         (t.absent += num(n.absent)),
         (t.early += num(n.earlyout)),
@@ -3453,7 +3465,7 @@ function AttendanceApp() {
       React.createElement(
         "p",
         { className: "dash-foot" },
-        "Counts completed days only, up to yesterday; today and later scheduled days aren\u2019t counted until they\u2019re over. Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave and waived tardiness are credited and not counted as loss; OFF days are excluded.",
+        "Counts days up to yesterday, plus today for agents who already have something logged (today\u2019s numbers are provisional until the day ends). Future scheduled days aren\u2019t counted. Loss = absent + tardy + early out. Attendance = (scheduled \u2212 loss) \u00f7 scheduled. Leave and waived tardiness are credited and not counted as loss; OFF days are excluded.",
       ),
     );
   };
@@ -6696,7 +6708,7 @@ root.render(React.createElement(AttendanceApp, null));
     <div class="gd-sec">
       <h3>3 · Dashboard metrics</h3>
       <div class="gd-f">Loss = Absent + Early&nbsp;Out + Tardy &nbsp;(Leave excluded)<br>Attendance&nbsp;% = (Scheduled &minus; Loss) &divide; Scheduled<br>Shrinkage&nbsp;% = Loss &divide; Scheduled</div>
-      <p class="gd-note">Totals roll up across the current filters (month, campaign, agent). Rest days (OFF) aren&rsquo;t scheduled, so they don&rsquo;t affect the percentages. Only completed days count: today and future scheduled days are left out until they&rsquo;re over, so a pre-generated schedule can&rsquo;t inflate the score.</p>
+      <p class="gd-note">Totals roll up across the current filters (month, campaign, agent). Rest days (OFF) aren&rsquo;t scheduled, so they don&rsquo;t affect the percentages. Past days always count. Today counts only for agents who already have something logged (absent, tardy, early out, leave or OT), so today&rsquo;s figures are provisional until the day ends. Future scheduled days are left out, so a pre-generated schedule can&rsquo;t inflate the score.</p>
     </div>
 
     <div class="gd-sec">
