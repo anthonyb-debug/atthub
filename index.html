@@ -3619,7 +3619,7 @@ function AttendanceApp() {
         logVal: "Minutes lost",
       },
       leave: {
-        intro: "Planned leave on scheduled days. Leave keeps its scheduled minutes, so it does not lower attendance.",
+        intro: "Planned leave on scheduled days. Leave keeps its scheduled minutes, so it does not lower attendance. Leave dated after today is listed under Upcoming leave and moves into the totals on the day itself.",
         kpis: [
           ["Leave days", fmtN(tot.leaveD), fmtN(tot.days) + " scheduled days in view"],
           ["Leave rate", fmtP(tot.days ? tot.leaveD / tot.days : null), "Leave days \u00f7 scheduled days"],
@@ -3681,6 +3681,15 @@ function AttendanceApp() {
     const sideMax = Math.max(1, ...sideRows.map((r) => r[1]));
     log.sort((a, b) => (b.r.date || "").localeCompare(a.r.date || "") || (a.r.name || "").localeCompare(b.r.name || ""));
     rpRef.current = { kind: kind, cfg: cfg, rows: rows, log: log };
+    const tdy = todayYMD(),
+      upcoming = kind !== "leave" ? [] : s
+        .filter((r) => {
+          if (!r.date || r.date <= tdy || !(num(r.leave) > 0)) return !1;
+          const mo = monthOf(r);
+          return (I === "all" || mo.month === I) && (nt === "all" || String(mo.year) === String(nt)) &&
+            (ot === "all" || (r.campaign || "") === ot) && (at === "all" || (r.name || "") === at);
+        })
+        .sort((a, b) => a.date.localeCompare(b.date) || (a.name || "").localeCompare(b.name || ""));
     const accent = kind === "tardy" ? "#C08A2D" : kind === "absence" ? "#B23A3A" : kind === "waiver" ? "#2563EB" : "#2C7BB6";
     return React.createElement(
       "div",
@@ -3699,6 +3708,59 @@ function AttendanceApp() {
           ),
         ),
       ),
+        upcoming.length > 0 &&
+        React.createElement(
+          "section",
+          { className: "panel", style: { marginBottom: 16 } },
+          React.createElement(
+            "div",
+            { className: "panel-h" },
+            React.createElement("h2", null, "Upcoming leave"),
+            React.createElement("span", { className: "panel-meta" }, upcoming.length + (upcoming.length === 1 ? " day" : " days") + " \u00b7 not yet counted in the totals above"),
+          ),
+          React.createElement(
+            "div",
+            { className: "rt-wrap", style: { maxHeight: 320 } },
+            React.createElement(
+              "table",
+              { className: "rt" },
+              React.createElement(
+                "thead",
+                null,
+                React.createElement(
+                  "tr",
+                  null,
+                  React.createElement("th", { className: "l" }, "Date"),
+                  React.createElement("th", { className: "l" }, "Agent"),
+                  React.createElement("th", { className: "l" }, "Campaign"),
+                  React.createElement("th", { className: "l" }, "Shift"),
+                  React.createElement("th", { className: "l" }, "Leave type"),
+                  React.createElement("th", null, "Minutes"),
+                ),
+              ),
+              React.createElement(
+                "tbody",
+                null,
+                upcoming.map((r) =>
+                  React.createElement(
+                    "tr",
+                    { key: r.id },
+                    React.createElement("td", { className: "l mono" }, React.createElement("span", { className: "log-wd" }, lt(r).day), fmtMDY(r.date)),
+                    React.createElement(
+                      "td",
+                      { className: "l" },
+                      React.createElement("button", { type: "button", className: "rt-link", onClick: () => Ft({ name: r.name || "\u2014", campaign: r.campaign || "" }) }, r.name || "\u2014"),
+                    ),
+                    React.createElement("td", { className: "l" }, r.campaign || "\u2014"),
+                    React.createElement("td", { className: "l mono muted" }, r.shift || "\u2014"),
+                    React.createElement("td", { className: "l" }, String(r.leaveType || "").trim() || "Planned Leave"),
+                    React.createElement("td", { className: "mono" }, fmtN(num(r.leave))),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
         React.createElement(
           "section",
           { className: "panel", style: { marginBottom: 16 } },
