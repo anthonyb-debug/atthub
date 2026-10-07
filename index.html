@@ -2975,7 +2975,7 @@ function AttendanceApp() {
       const items = [];
       am.forEach((x) => {
         const over = x.lateMin >= 60 || x.late >= 6,
-          near = !over && ((x.late >= 4 && x.late <= 5) || (x.lateMin >= 45 && x.lateMin <= 59));
+          near = !over && ((x.late >= 3 && x.late <= 5) || (x.lateMin >= 30 && x.lateMin <= 59));
         if (!over && !near && x.absD === 0) return;
         x.level = over ? 3 : near ? 2 : 1;
         x.over = over;
@@ -3090,8 +3090,8 @@ function AttendanceApp() {
                             ? React.createElement("span", { className: "chip chip-warn" }, "Approaching")
                             : React.createElement("span", { className: "chip" }, "Absent"),
                       ),
-                      React.createElement("td", { className: "mono" + (x.late >= 6 ? " hit-over" : x.late >= 4 ? " hit-near" : "") }, x.late),
-                      React.createElement("td", { className: "mono" + (x.lateMin >= 60 ? " hit-over" : x.lateMin >= 45 ? " hit-near" : "") }, x.lateMin),
+                      React.createElement("td", { className: "mono" + (x.late >= 6 ? " hit-over" : x.late >= 3 ? " hit-near" : "") }, x.late),
+                      React.createElement("td", { className: "mono" + (x.lateMin >= 60 ? " hit-over" : x.lateMin >= 30 ? " hit-near" : "") }, x.lateMin),
                       React.createElement("td", { className: "mono" }, x.absD),
                       React.createElement(
                         "td",
@@ -3560,7 +3560,7 @@ function AttendanceApp() {
     });
     agMonth.forEach((m) => {
       const over = m.min >= 60 || m.cnt >= 6,
-        near = !over && ((m.cnt >= 4 && m.cnt <= 5) || (m.min >= 45 && m.min <= 59));
+        near = !over && ((m.cnt >= 3 && m.cnt <= 5) || (m.min >= 30 && m.min <= 59));
       over ? (m.a.flag = !0) : near && (m.a.near = !0);
     });
     const list = Array.from(agents.values()),
@@ -3569,12 +3569,12 @@ function AttendanceApp() {
       withMetric = list.filter((a) => (kind === "tardy" ? a.tardyCnt > 0 : kind === "absence" ? a.absD > 0 : kind === "waiver" ? a.waivedCnt > 0 : a.leaveD > 0));
     const cfg = {
       tardy: {
-        intro: "Late arrivals and early outs on scheduled days. An agent goes on the watchlist at 6 late arrivals or 60 late minutes in a month, and is approaching the threshold at 4\u20135 lates or 45\u201359 minutes. Waived tardies are listed but don\u2019t count toward these limits.",
+        intro: "Late arrivals and early outs on scheduled days. An agent goes on the watchlist at 6 late arrivals or 60 late minutes in a month, and is approaching the threshold at 3\u20135 lates or 30\u201359 minutes. Waived tardies are listed but don\u2019t count toward these limits.",
         kpis: [
           ["Late arrivals", fmtN(tot.tardyCnt), (tot.waivedCnt ? fmtN(tot.waivedCnt) + " waived \u00b7 " : "") + (tot.days ? fmtP(tot.tardyCnt / tot.days) + " of scheduled days" : "No scheduled days")],
           ["Minutes late (counted)", fmtN(tot.tardyMin - (tot.waivedMin || 0)), tot.waivedMin ? fmtN(tot.tardyMin) + " actual \u00b7 " + fmtN(tot.waivedMin) + " waived" : tot.tardyCnt ? fmtD(tot.tardyMin / tot.tardyCnt) + " min per late arrival" : "\u2014"],
           ["On watchlist", fmtN(flagged), "6+ lates or 60+ min in a month", "over"],
-          ["Approaching threshold", fmtN(nearing), "4\u20135 lates or 45\u201359 min in a month", "near"],
+          ["Approaching threshold", fmtN(nearing), "3\u20135 lates or 30\u201359 min in a month", "near"],
         ],
         cols: [
           ["name", "Agent", "l"], ["campaign", "Campaign", "l"], ["tardyCnt", "Late days"], ["tardyMin", "Late min"],
@@ -6792,7 +6792,7 @@ root.render(React.createElement(AttendanceApp, null));
       <p>An agent is flagged for a month when either threshold is hit:</p>
       <div class="gd-f">Tardy minutes &ge; 60 &nbsp;&nbsp;OR&nbsp;&nbsp; Tardy count &ge; 6 (in the month)</div>
       <p style="margin-top:10px"><b>Approaching threshold</b> is an early warning for agents who are close but not yet flagged:</p>
-      <div class="gd-f">Tardy count 4&ndash;5 &nbsp;&nbsp;OR&nbsp;&nbsp; Tardy minutes 45&ndash;59 (in the month)</div>
+      <div class="gd-f">Tardy count 3&ndash;5 &nbsp;&nbsp;OR&nbsp;&nbsp; Tardy minutes 30&ndash;59 (in the month)</div>
     </div>
 
     <div class="gd-sec">
